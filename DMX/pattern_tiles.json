@@ -1,0 +1,275 @@
+[
+  {
+    "title": "スロット 1",
+    "channels": [
+      0,
+      128,
+      0,
+      0,
+      0,
+      48,
+      67,
+      63,
+      110,
+      0
+    ],
+    "motion_index": 9,
+    "motion_speed": 1.9300000000000002,
+    "apply_dot_base": true,
+    "club_dot_ch9": 110,
+    "run_motion": true,
+    "hotkey": null
+  },
+  {
+    "title": "スロット 2",
+    "channels": [
+      100,
+      13,
+      0,
+      0,
+      0,
+      66,
+      0,
+      29,
+      110,
+      0
+    ],
+    "motion_index": 22,
+    "motion_speed": 0.25,
+    "apply_dot_base": true,
+    "club_dot_ch9": 110,
+    "run_motion": true,
+    "hotkey": "d"
+  },
+  {
+    "title": "スロット 3",
+    "channels": [
+      0,
+      128,
+      0,
+      0,
+      0,
+      119,
+      67,
+      63,
+      27,
+      0
+    ],
+    "motion_index": 9,
+    "motion_speed": 13.795,
+    "apply_dot_base": true,
+    "club_dot_ch9": 27,
+    "run_motion": true,
+    "hotkey": null
+  },
+  {
+    "title": "スロット 4",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      61,
+      0,
+      63,
+      12,
+      48
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 12,
+    "run_motion": false,
+    "hotkey": "a"
+  },
+  {
+    "title": "スロット 5",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      13,
+      0,
+      63,
+      12,
+      48
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 12,
+    "run_motion": false,
+    "hotkey": "s"
+  },
+  {
+    "title": "スロット 6",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      30,
+      0,
+      63,
+      90,
+      0
+    ],
+    "motion_index": 19,
+    "motion_speed": 6.487,
+    "apply_dot_base": true,
+    "club_dot_ch9": 90,
+    "run_motion": true,
+    "hotkey": "f"
+  },
+  {
+    "title": "r1",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      0,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": null
+  },
+  {
+    "title": "r2",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      12,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": "w"
+  },
+  {
+    "title": "r3",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      23,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": "e"
+  },
+  {
+    "title": "r4",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      41,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": "r"
+  },
+  {
+    "title": "r5",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      68,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": "t"
+  },
+  {
+    "title": "r6",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      90,
+      0,
+      63,
+      0,
+      0
+    ],
+    "motion_index": 20,
+    "motion_speed": 16.0,
+    "apply_dot_base": true,
+    "club_dot_ch9": 0,
+    "run_motion": false,
+    "hotkey": "y"
+  },
+  {
+    "title": "ed",
+    "channels": [
+      100,
+      128,
+      0,
+      0,
+      0,
+      44,
+      28,
+      63,
+      68,
+      0
+    ],
+    "motion_index": 24,
+    "motion_speed": 9.7,
+    "apply_dot_base": true,
+    "club_dot_ch9": 68,
+    "run_motion": true,
+    "hotkey": "q"
+  }
+]

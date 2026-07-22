@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Single Head RGB スキャンレーザーライト - 取扱説明書</title>
+  <style>
+    :root{
+      --max-width: 900px;
+      --main-font: "Hiragino Kaku Gothic ProN", "Meiryo", sans-serif;
+    }
+    body{
+      font-family: var(--main-font);
+      line-height: 1.45;
+      color: #111;
+      padding: 20px;
+      background: #fff;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .container{
+      max-width: var(--max-width);
+      margin: 0 auto;
+    }
+    h1{
+      font-size: 22px;
+      margin-bottom: 6px;
+    }
+    h2{
+      font-size: 16px;
+      margin-top: 18px;
+      margin-bottom: 8px;
+      border-left: 4px solid #444;
+      padding-left: 8px;
+    }
+    p, li{
+      font-size: 13px;
+    }
+    ul{ padding-left: 18px; }
+    .small { font-size: 12px; color:#333; }
+    .table-wrap{ overflow-x:auto; margin:10px 0 18px 0; }
+    table{
+      border-collapse: collapse;
+      width:100%;
+      margin-bottom: 12px;
+    }
+    table th, table td{
+      border:1px solid #999;
+      padding:6px 8px;
+      vertical-align: top;
+    }
+    table th{
+      background:#eee;
+      text-align:left;
+      font-weight:600;
+    }
+    /* チャンネル表を印刷1ページに収めるための小さめスタイル */
+    .dmx-table-wrapper table{ font-size:11px; }
+    .dmx-table-wrapper th, .dmx-table-wrapper td{ padding:4px 6px; }
+    .pattern-table-wrapper table{ font-size:11px; }
+    .pattern-table-wrapper th, .pattern-table-wrapper td{ padding:4px 6px; vertical-align:top; }
+    .pattern-table-wrapper td:first-child{ white-space:nowrap; width:7.5em; }
+    .pattern-table-wrapper td:last-child{ word-break:break-word; }
+    .callout{
+      border-left:4px solid #369;
+      padding:8px 12px;
+      margin:10px 0 16px 0;
+      background:#f6fafc;
+    }
+    /* リモコンイメージの代替説明ボックス */
+    .remote-box{
+      border:1px dashed #bbb;
+      padding:10px;
+      margin-top:8px;
+      background:#fafafa;
+    }
+    /* 印刷用調整 */
+    @media print{
+      body { padding: 8mm; }
+      h1{ font-size:18px; }
+      .container{ width: auto; margin:0; }
+      .no-print{ display:none; }
+      .dmx-table-wrapper table{ font-size:10px; }
+      .pattern-table-wrapper table{ font-size:9px; }
+      table th, table td{ border: 0.5px solid #666; padding:3px 5px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Single Head RGB スキャンレーザーライト — 取扱説明書</h1>
+    <p class="small">ご購入ありがとうございます。本製品を安全にご使用いただくため、必ず本取扱説明書をよく読み、正しくお使いください。</p>
+
+    <h2>● 同梱品（Packing List）</h2>
+    <ul>
+      <li>Single head RGB スキャンレーザーライト　……　1 台</li>
+      <li>取扱説明書（本書）　……　1 冊</li>
+      <li>リモコン　……　1 個</li>
+    </ul>
+
+    <h2>● 技術仕様（Technical Parameters）</h2>
+    <ul>
+      <li>電源：AC100～240V、50Hz/60Hz</li>
+      <li>レーザー出力：500mW RGB</li>
+      <li>本体材質：鉄</li>
+      <li>走査システム：高速・広角精密モーター</li>
+      <li>電源接続：電源コード</li>
+      <li>信号接続：信号入力線 / 出力線</li>
+      <li>制御チャネル：10 チャネル（DMX-512）</li>
+      <li>制御モード：DMX-512 制御、音声制御（サウンドモード）、自動モード、マスタースレーブ</li>
+      <li>冷却方式：強制空冷（ファン）</li>
+      <li>使用環境：屋内</li>
+      <li>梱包形態：カートン</li>
+      <li>製品サイズ：18 × 11.5 × 6.5 cm（本体目安）</li>
+      <li>内箱サイズ：22 × 17 × 13 cm</li>
+      <li>カートンサイズ：72 × 37 × 48 cm（20 台 / カートン）</li>
+      <li>重量：N.W. 1.25 kg / G.W. 1.4 kg（目安）</li>
+    </ul>
+
+    <h2>● 使用前の確認（Instructions for Use）</h2>
+    <p>箱を開けたら、輸送による破損がないか（ネジの緩み、レンズ破損など）をよく確認してください。通電前に必ず点検し、本体が正しく安全に設置されていること、電源電圧が製品と同一であることを確認してください。</p>
+
+    <h2>● 表示機能（Display Function）</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th style="width:60px">No.</th><th style="width:140px">表示</th><th>機能説明</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>A001～A512</td><td>DMX512 アドレスコード設定</td></tr>
+          <tr><td>2</td><td>AU01～AU04</td><td>自動モード（全4モード）</td></tr>
+          <tr><td>3</td><td>So01～So04</td><td>サウンド（音声）モード（全4モード）</td></tr>
+          <tr><td>4</td><td>SE01～SE99</td><td>サウンド感度（音声制御の感度設定）</td></tr>
+          <tr><td>5</td><td>CL01～CL03</td><td>カラー選択：CL01（単色）、CL02（R+G）、CL03（RGB）など</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>● DMX チャネル機能（DMX Channel Function）</h2>
+    <p>本製品は標準 DMX-512 信号を使用し、合計 10 チャネルで制御します。以下は各チャネルの機能一覧です。<br><span class="small">（チャンネル一覧は印刷時に 1 ページに収まるよう小さめのフォントで表示されます）</span></p>
+    <p class="small">※ この 10CH の割り当てには<strong>光の強さ（ディマー／輝度・出力レベル）専用のチャンネルはありません</strong>。明るさは機種側の固定出力が前提で、暗くする場合は CH1 のブラックアウト（クローズドライト）などでビームを止める運用になります。連続ディミングが必要な場合は機種・別機材の仕様を確認してください。</p>
+
+    <div class="dmx-table-wrapper table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:60px">チャネル</th>
+            <th style="width:150px">指示内容</th>
+            <th style="width:90px">値の範囲</th>
+            <th>機能（説明）</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>CH1</td><td>モード選択</td><td>0–63</td><td>クローズドライトモード</td></tr>
+          <tr><td></td><td></td><td>64–127</td><td>マニュアルモード</td></tr>
+          <tr><td></td><td></td><td>128–191</td><td>オートモード</td></tr>
+          <tr><td></td><td></td><td>192–255</td><td>サウンドモード</td></tr>
+
+          <tr><td>CH2</td><td>オートモード / パターン</td><td>0–63</td><td>マニュアル時の<strong>図形バンク</strong>（細かな対応は下記「CH2 パターン一覧」※ pattern.txt と同一）</td></tr>
+          <tr><td></td><td></td><td>64–127</td><td>オートモード 1</td></tr>
+          <tr><td></td><td></td><td>128–191</td><td>オートモード 2</td></tr>
+          <tr><td></td><td></td><td>192–255</td><td>オートモード 3</td></tr>
+
+          <tr><td>CH3</td><td>角度制御</td><td>0–127</td><td>回転角度選択</td></tr>
+          <tr><td></td><td></td><td>128–191</td><td>正回転速度選択（値が大きいほど速い）</td></tr>
+          <tr><td></td><td></td><td>192–255</td><td>逆回転速度選択（値が大きいほど速い）</td></tr>
+
+          <tr><td>CH4</td><td>水平角</td><td>0–127</td><td>水平フリップ位置選択</td></tr>
+          <tr><td></td><td></td><td>128–255</td><td>水平フリップ速度（値が大きいほど速い）</td></tr>
+
+          <tr><td>CH5</td><td>垂直角</td><td>0–127</td><td>垂直フリップ位置選択</td></tr>
+          <tr><td></td><td></td><td>128–255</td><td>垂直フリップ速度（値が大きいほど速い）</td></tr>
+
+          <tr><td>CH6</td><td>水平位置</td><td>0–127</td><td>水平位置選択</td></tr>
+          <tr><td></td><td></td><td>128–255</td><td>水平移動速度（値が大きいほど速い）</td></tr>
+
+          <tr><td>CH7</td><td>垂直位置</td><td>0–127</td><td>垂直位置選択</td></tr>
+          <tr><td></td><td></td><td>128–255</td><td>垂直移動速度（値が大きいほど速い）</td></tr>
+
+          <tr><td>CH8</td><td>パターンサイズ制御</td><td>0–63</td><td><strong>固定サイズ</strong>。<strong>0</strong> が最大サイズ、<strong>63</strong> が最小サイズ（この範囲ではサイズは固定）</td></tr>
+          <tr><td></td><td></td><td>64–127</td><td><strong>徐々に大きくなる</strong>モード。<strong>値が大きいほど</strong>サイズが変わる<strong>スピードが速く</strong>なる</td></tr>
+          <tr><td></td><td></td><td>128–191</td><td><strong>徐々に小さくなる</strong>モード。<strong>値が大きいほど</strong>サイズが変わる<strong>スピードが速く</strong>なる</td></tr>
+          <tr><td></td><td></td><td>192–255</td><td><strong>徐々に大小を繰り返す</strong>モード。<strong>値が大きいほど</strong>サイズが変わる<strong>スピードが速く</strong>なる</td></tr>
+
+          <tr><td>CH9</td><td>カラー制御</td><td>0–63</td><td>単色選択</td></tr>
+          <tr><td></td><td></td><td>64–127</td><td>カラー混合</td></tr>
+          <tr><td></td><td></td><td>128–191</td><td>モノクロ自動</td></tr>
+          <tr><td></td><td></td><td>192–255</td><td>自動（カラー）</td></tr>
+          <tr><td colspan="4" class="small" style="background:#f9f9f9;">※ <strong>疑似点</strong>（CH2 を正方形四点にしているとき）専用の CH9 の区分は、下記「点の場合の CH9 カラー」と <code>pattern.txt</code> を参照。</td></tr>
+
+          <tr><td>CH10</td><td>コード制御</td><td>0–127</td><td>ドットとラインのあるパターン</td></tr>
+          <tr><td></td><td></td><td>128–255</td><td>ドット・ワイヤレスストリップパターン</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>● CH2 パターン／図形一覧（pattern.txt 準拠）</h2>
+    <p>CH1 を<strong>マニュアルモード（値 64–127）</strong>にしたうえで CH2 を調整すると、下表の<strong>値の範囲</strong>ごとに<strong>図形（形状）のみ</strong>が切り替わります。<strong>レーザーの色は CH2 ではなく CH9</strong>です（点モード時の CH9 区分は別表「点の場合の CH9 カラー」）。</p>
+    <p class="small">一覧はプロジェクト内の <code>pattern.txt</code> と同じ内容です。付属の制御アプリでは CH2 のコンボボックスから同じ名前を選べます。<strong>231–240</strong> の行だけ幅が 10 ステップです。</p>
+
+    <div class="pattern-table-wrapper table-wrap">
+      <table>
+        <thead>
+          <tr><th>CH2 値の範囲</th><th>図形・パターン名</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>0–5</td><td>正方形</td></tr>
+          <tr><td>6–10</td><td>円</td></tr>
+          <tr><td>11–15</td><td>水平線</td></tr>
+          <tr><td>16–20</td><td>垂直線</td></tr>
+          <tr><td>21–25</td><td>右下がり斜め線</td></tr>
+          <tr><td>26–30</td><td>右半円</td></tr>
+          <tr><td>31–35</td><td>上半円</td></tr>
+          <tr><td>36–40</td><td>三角形</td></tr>
+          <tr><td>41–45</td><td>&lt;</td></tr>
+          <tr><td>46–50</td><td>二重平行水平線</td></tr>
+          <tr><td>51–55</td><td>二重平行垂直線</td></tr>
+          <tr><td>56–60</td><td>横2本並び水平線</td></tr>
+          <tr><td>61–65</td><td>縦2本並び水平線</td></tr>
+          <tr><td>66–70</td><td>右下がり階段 末端水平</td></tr>
+          <tr><td>71–75</td><td>右下がり階段 末端垂直</td></tr>
+          <tr><td>76–80</td><td>♫</td></tr>
+          <tr><td>81–85</td><td>くずし円</td></tr>
+          <tr><td>86–90</td><td>ツリー(木)</td></tr>
+          <tr><td>91–95</td><td>3</td></tr>
+          <tr><td>96–100</td><td>U</td></tr>
+          <tr><td>101–105</td><td>☆</td></tr>
+          <tr><td>106–110</td><td>正弦波</td></tr>
+          <tr><td>111–115</td><td>2</td></tr>
+          <tr><td>116–120</td><td>1</td></tr>
+          <tr><td>121–125</td><td>♡</td></tr>
+          <tr><td>126–130</td><td>正方形四点</td></tr>
+          <tr><td>131–135</td><td>リンゴの形</td></tr>
+          <tr><td>136–140</td><td>点円</td></tr>
+          <tr><td>141–145</td><td>右上、左下小円</td></tr>
+          <tr><td>146–150</td><td>二重丸</td></tr>
+          <tr><td>151–155</td><td>三角形と中に三点から中心に伸びる３本線</td></tr>
+          <tr><td>156–160</td><td>十字</td></tr>
+          <tr><td>161–165</td><td>円と中に正方形</td></tr>
+          <tr><td>166–170</td><td>二重三角形</td></tr>
+          <tr><td>171–175</td><td>星型５本線</td></tr>
+          <tr><td>176–180</td><td>60度角の中心から３本線</td></tr>
+          <tr><td>181–185</td><td>右下がり階段水平線のみ</td></tr>
+          <tr><td>186–190</td><td>五角形</td></tr>
+          <tr><td>191–195</td><td>十字花形</td></tr>
+          <tr><td>196–200</td><td>四方向三角キー</td></tr>
+          <tr><td>201–205</td><td>左矢印</td></tr>
+          <tr><td>206–210</td><td>砂時計形</td></tr>
+          <tr><td>211–215</td><td>三方向手裏剣</td></tr>
+          <tr><td>216–220</td><td>三方向プロペラ</td></tr>
+          <tr><td>221–225</td><td>辺が長方形で構成されたひし形</td></tr>
+          <tr><td>226–230</td><td>右向き枠アリ三角</td></tr>
+          <tr><td>231–240</td><td>ひし形（10 ステップ幅）</td></tr>
+          <tr><td>241–245</td><td>三角波</td></tr>
+          <tr><td>246–250</td><td>四方向プロペラ</td></tr>
+          <tr><td>251–255</td><td>波長方形</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>● 「点」に近い見え方にする設定（参考）</h2>
+    <div class="callout">
+      <p style="margin:0 0 8px 0;"><strong>次の 3 チャンネルを同時に指定すると、疑似的に点のみに近い見え方になりやすいです。</strong></p>
+      <ul style="margin:0;">
+        <li><strong>CH1</strong>：マニュアルモード（64–127 の範囲。例：<strong>100</strong>）</li>
+        <li><strong>CH2</strong>：<strong>126–130</strong>（正方形四点）</li>
+        <li><strong>CH8</strong>：<strong>63</strong></li>
+      </ul>
+      <p class="small" style="margin:10px 0 0 0;">アプリでは「疑似点の土台だけ」で CH1／CH2／CH8 のみ合わせられます。<strong>点の見え方を保ったまま</strong>位置や色を変えるときは、CH2・CH8 は触らずに <strong>CH3（角度）・CH4／CH5（ミラー）・CH6／CH7（位置）・CH9（色）・CH10（コード）</strong> を調整してください。制御アプリの「クラブ向け疑似点」一覧からも適用できます。<strong>右下原点は CH6=0・CH7=0</strong>。値を上げるほど左・上に寄ります（点パターンでは角度 CH3 はほぼ効きません）。CH9 の色は下表を参照してください。</p>
+    </div>
+
+    <h2>● 点の場合の CH9 カラー（pattern.txt 準拠）</h2>
+    <p class="small">CH2 を<strong>正方形四点（疑似点）</strong>にしているときの CH9 の区分です。それ以外の図形では、上記「DMX チャネル機能」の CH9 一般的な説明が優先される場合があります。</p>
+    <div class="pattern-table-wrapper table-wrap">
+      <table>
+        <thead>
+          <tr><th>CH9 値の範囲</th><th>色・動作</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>0–19</td><td>赤</td></tr>
+          <tr><td>20–39</td><td>緑</td></tr>
+          <tr><td>40–59</td><td>オレンジ</td></tr>
+          <tr><td>60–79</td><td>青</td></tr>
+          <tr><td>80–99</td><td>紫</td></tr>
+          <tr><td>100–119</td><td>水色</td></tr>
+          <tr><td>120–255</td><td>自動（値が大きいほど色が変わるスピードが速くなる）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>● メンテナンス（Maintenance）</h2>
+    <ol>
+      <li>塵・汚れ・煙・油などがランプ本体に付着しないようにし、レーザー光学系を清潔に保ってください。</li>
+      <li>レンズは月に一度程度、プロ用のガラスクリーナーで清掃することを推奨します。最大出力と寿命維持のためです。</li>
+      <li>発光ダイオード（半導体光源）を長時間直視しないでください。目を傷めるおそれがあります。</li>
+    </ol>
+
+    <h2>● 設置上の注意（Special precautions for installation）</h2>
+    <p>吊り下げ、ハンギング、固定して高所に設置する場合は、必ず安全ロープ等の二次固定を行ってください。通常のフックのみでの取り付けでは落下の危険性があり危険です。安全対策を行わない設置は受け入れられません。</p>
+
+    <h2>● リモコン操作（Remote Control Operation）</h2>
+    <div class="remote-box">
+      <p><strong>ボタンと機能（概要）</strong></p>
+      <ul>
+        <li><strong>OFF / ON</strong>：電源オフ / オン</li>
+        <li><strong>R / G / B</strong>：赤 / 緑 / 青 の単色切替</li>
+        <li><strong>Sound</strong>：サウンド（音声）モードへ切替</li>
+        <li><strong>Auto</strong>：オートモードへ切替</li>
+        <li><strong>SE</strong>：サウンド感度（Sound sensitivity）</li>
+        <li><strong>UP / Down / DMX</strong>：DMX アドレス設定や値の調整</li>
+      </ul>
+      <p class="small">（リモコンの各ボタン配置は製品実物の表示に従ってください）</p>
+    </div>
+
+    <hr style="margin:18px 0; border:none; border-top:1px solid #ddd;" />
+
+    <p class="small">※ 本書は製品付属の簡易マニュアルの内容を日本語に翻訳・整理したものです。実際の製品の表示やラベルを優先してください。さらに詳しい設定やトラブル時は販売店またはサービスセンターへご相談ください。</p>
+
+    <p class="no-print small" style="margin-top:18px;">--- 保存方法：このページを右クリック → 「名前を付けて保存」 で HTML として保存できます。印刷はブラウザの印刷プレビューで余白や縮小設定を調整してください。</p>
+  </div>
+</body>
+</html>
