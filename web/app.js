@@ -400,6 +400,61 @@
       if (prev.has(c.cue_id) || selectedCueIds.has(c.cue_id)) opt.selected = true;
       list.appendChild(opt);
     });
+    updateCueHistoryUi();
+  }
+
+  function updateCueHistoryUi() {
+    const h = state?.cue_history || {};
+    const undoBtn = $("btnCueUndo");
+    const redoBtn = $("btnCueRedo");
+    if (undoBtn) undoBtn.disabled = !h.can_undo;
+    if (redoBtn) redoBtn.disabled = !h.can_redo;
+    const st = $("cueHistStatus");
+    if (st) {
+      const i = (h.index ?? 0) + 1;
+      const n = h.length ?? 1;
+      st.textContent = `履歴 ${i}/${n}`;
+    }
+  }
+
+  function deleteSelectedCues() {
+    const list = $("cueList");
+    let ids = [...list.selectedOptions].map((o) => o.value);
+    if (!ids.length && selectedCueIds.size) ids = [...selectedCueIds];
+    if (!ids.length) {
+      alert("削除するキューを一覧から選択してください（Ctrl/Shift+クリックで複数可）");
+      return;
+    }
+    api("/api/cues/delete", { method: "POST", body: JSON.stringify({ cue_ids: ids }) })
+      .then((j) => {
+        if (j.state) state = j.state;
+        selectedCueIds = new Set();
+        renderCues();
+        drawTimeline();
+      })
+      .catch(alert);
+  }
+
+  function undoCues() {
+    api("/api/cues/undo", { method: "POST" })
+      .then((j) => {
+        if (j.state) state = j.state;
+        selectedCueIds = new Set();
+        renderCues();
+        drawTimeline();
+      })
+      .catch(alert);
+  }
+
+  function redoCues() {
+    api("/api/cues/redo", { method: "POST" })
+      .then((j) => {
+        if (j.state) state = j.state;
+        selectedCueIds = new Set();
+        renderCues();
+        drawTimeline();
+      })
+      .catch(alert);
   }
 
   function renderDmx() {
@@ -762,7 +817,7 @@
     while (editChannels.length < 10) editChannels.push(0);
     $("teTitle").value = `スロット ${(state?.tiles?.length || 0) + 1}`;
     $("teHotkey").value = "";
-    $("teLaser").checked = true;
+    $("teLaser").checked = false;
     $("teLed").checked = false;
     $("teRunMotion").checked = true;
     $("teDotBase").checked = dmx.apply_dot_base !== false;
@@ -1256,17 +1311,30 @@
     }).catch(() => {})
   );
 
-  $("btnDelCue").addEventListener("click", () => {
-    const ids = [...$("cueList").selectedOptions].map((o) => o.value);
-    if (!ids.length && selectedCueIds.size) ids.push(...selectedCueIds);
-    if (!ids.length) return;
-    api("/api/cues/delete", { method: "POST", body: JSON.stringify({ cue_ids: ids }) })
-      .then(refreshState)
-      .catch(alert);
+  $("btnDelCue").addEventListener("click", deleteSelectedCues);
+  $("btnCueSelectAll").addEventListener("click", () => {
+    const list = $("cueList");
+    [...list.options].forEach((o) => {
+      o.selected = true;
+    });
+    selectedCueIds = new Set([...list.options].map((o) => o.value));
+  });
+  $("btnCueUndo").addEventListener("click", undoCues);
+  $("btnCueRedo").addEventListener("click", redoCues);
+  $("cueList").addEventListener("change", () => {
+    selectedCueIds = new Set([...$("cueList").selectedOptions].map((o) => o.value));
+    drawTimeline();
   });
   $("btnClearCues").addEventListener("click", () => {
     if (!confirm("キューを全消去しますか？")) return;
-    api("/api/cues/clear", { method: "POST" }).then(refreshState).catch(alert);
+    api("/api/cues/clear", { method: "POST" })
+      .then((j) => {
+        if (j.state) state = j.state;
+        selectedCueIds = new Set();
+        renderCues();
+        drawTimeline();
+      })
+      .catch(alert);
   });
 
   $("btnSaveProj").addEventListener("click", () => {
@@ -1605,9 +1673,8 @@
   });
   $("btnTileCapture").addEventListener("click", () => {
     openTileSidebar("new");
-    // キャプチャ相当: 現在の DMX をフォームに載せたうえでレーザー ON
+    // キャプチャ相当: 現在の DMX をフォームに載せたうえで機器はユーザーが選ぶ
     defaultNewTileForm();
-    $("teLaser").checked = true;
     syncDevicePanels();
     $("tileSidebarTitle").textContent = "現在をキャプチャ";
     $("btnTileSidebarSave").textContent = "キャプチャして作成";
@@ -1683,10 +1750,41 @@
     api("/api/ai/stop", { method: "POST" }).then(refreshState).catch(alert)
   );
 
-  // Space + hotkeys
+  // Space + hotkeys + cue history
   window.addEventListener("keydown", (e) => {
     const tag = (e.target && e.target.tagName) || "";
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    const inText = tag === "INPUT" || tag === "TEXTAREA";
+    const inCueList = e.target === $("cueList");
+
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) {
+        if (!inText) {
+          e.preventDefault();
+          undoCues();
+        }
+        return;
+      }
+      if (k === "y" || (k === "z" && e.shiftKey)) {
+        if (!inText) {
+          e.preventDefault();
+          redoCues();
+        }
+        return;
+      }
+    }
+
+    if (inText) return;
+
+    if (inCueList) {
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        deleteSelectedCues();
+      }
+      return;
+    }
+    if (tag === "SELECT") return;
+
     if (e.code === "Space") {
       e.preventDefault();
       if (e.repeat) return;
@@ -1700,7 +1798,7 @@
     }
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault();
-      $("btnDelCue").click();
+      deleteSelectedCues();
       return;
     }
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;

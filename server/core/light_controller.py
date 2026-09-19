@@ -137,6 +137,7 @@ try:
         _LED_FX_ASSETS,
         _MOTION_SY_OUT_MAX,
         _MOTION_SY_OUT_MIN,
+        _motion_name_drives_ch9,
         _pattern_tile_from_led_fx,
         set_motion_sy_range,
     )
@@ -165,6 +166,11 @@ except Exception:
 
     def _pattern_tile_from_led_fx(asset: Any, *, rgb: Any = None) -> Any:  # type: ignore[misc]
         raise RuntimeError("LED アセット未対応")
+
+    def _motion_name_drives_ch9(name: str) -> bool:  # type: ignore[misc]
+        if not name:
+            return False
+        return ("4点上空ファン" in name) or ("色のみ" in name) or ("オート色" in name)
 
 # CH9 代表値 → ボタン表示用の近似色（機材帯域の見た目）
 _CH9_SWATCH_RGB: dict[int, tuple[int, int, int]] = {
@@ -330,6 +336,8 @@ class LightController:
     holds: dict[str, dict[str, Any]] = field(default_factory=dict)  # source -> tile
     hold_order: list[str] = field(default_factory=list)
     cues: list[PunchCue] = field(default_factory=list)
+    _cue_hist: list[list[dict[str, Any]]] = field(default_factory=list)
+    _cue_hist_i: int = 0
     punch_record: bool = False
     punch_autoplay: bool = True
     _punch_pending: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -387,6 +395,7 @@ class LightController:
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         PROJECT_DIR.mkdir(parents=True, exist_ok=True)
         self.reload_tiles()
+        self._reset_cue_history()
         if LedController is not None and AsyncWorker is not None:
             self._ble = LedController()
             self._ble_worker = AsyncWorker()
@@ -538,6 +547,12 @@ class LightController:
                     }
                     for c in self.cues
                 ],
+                "cue_history": {
+                    "can_undo": self._cue_hist_i > 0,
+                    "can_redo": self._cue_hist_i < len(self._cue_hist) - 1,
+                    "index": self._cue_hist_i,
+                    "length": len(self._cue_hist),
+                },
                 "last_error": self.last_error,
             }
 
@@ -673,6 +688,7 @@ class LightController:
         self._emit("hold")
 
     def hold_remove(self, source: str) -> None:
+        recorded = False
         with self._lock:
             pend = self._punch_pending.pop(source, None)
             if pend is not None:
@@ -686,12 +702,16 @@ class LightController:
                 )
                 self.cues.append(cue)
                 self.cues.sort(key=lambda c: (c.t, c.cue_id))
+                recorded = True
             if source in self.holds:
                 del self.holds[source]
             if source in self.hold_order:
                 self.hold_order.remove(source)
             self._cue_hold_until.pop(source, None)
             self._sync_holds()
+        if recorded:
+            self._commit_cue_history()
+            self._emit("cues")
         self._emit("hold")
 
     def _sync_holds(self) -> None:
@@ -728,12 +748,16 @@ class LightController:
         if len(ch) != 10:
             return
         vals = [max(0, min(255, int(v))) for v in ch]
+        ch9 = max(0, min(255, int(tile.get("club_dot_ch9", vals[8]))))
         if len(vals) == 10:
-            vals[8] = max(0, min(255, int(tile.get("club_dot_ch9", vals[8]))))
+            vals[8] = ch9
+        self.club_dot_ch9 = ch9
         self.set_channels(vals, push=True)
         sp = float(tile.get("motion_speed", 1.35))
         self.motion_speed = max(MOTION_SPEED_MIN, min(MOTION_SPEED_MAX, sp))
         mi = int(tile.get("motion_index", 0))
+        if tile.get("apply_dot_base", True):
+            self.apply_dot_base = True
         if tile.get("run_motion") and DOT_POINT_MOTIONS:
             mi = max(0, min(len(DOT_POINT_MOTIONS) - 1, mi))
             self.start_motion(mi)
@@ -924,12 +948,26 @@ class LightController:
                     ch4 = step[5] if len(step) > 5 else None
                     ch1 = step[6] if len(step) > 6 else None
                     ch3 = step[7] if len(step) > 7 else None
+                    # Python UI と同じ: ほとんどのモーションは内蔵色ローテを捨て、
+                    # パレット／CH9（club_dot_ch9）を優先する
+                    cur_name = ""
+                    try:
+                        if 0 <= self.motion_index < len(DOT_POINT_MOTIONS):
+                            cur_name = DOT_POINT_MOTIONS[self.motion_index][0]
+                    except Exception:
+                        cur_name = ""
+                    if ch9 is not None and not _motion_name_drives_ch9(cur_name):
+                        ch9 = None
                     if ch6 is not None:
                         ch[5] = max(0, min(255, int(ch6)))
                     if ch7 is not None:
                         ch[6] = max(0, min(255, int(ch7)))
                     if ch9 is not None:
                         ch[8] = max(0, min(255, int(ch9)))
+                        self.club_dot_ch9 = ch[8]
+                    else:
+                        # 手動色を毎フレーム維持（モーション内蔵ローテで上書きしない）
+                        ch[8] = max(0, min(255, int(self.club_dot_ch9)))
                     if ch8 is not None:
                         ch[7] = max(0, min(255, int(ch8)))
                     if ch2 is not None:
@@ -1412,12 +1450,93 @@ class LightController:
 
     def delete_cues(self, cue_ids: list[str]) -> None:
         ids = set(cue_ids)
+        if not ids:
+            return
+        before = len(self.cues)
         self.cues = [c for c in self.cues if c.cue_id not in ids]
+        if len(self.cues) != before:
+            self._commit_cue_history()
         self._emit("cues")
 
     def clear_cues(self) -> None:
+        if not self.cues:
+            self._emit("cues")
+            return
         self.cues.clear()
+        self._commit_cue_history()
         self._emit("cues")
+
+    def _cues_to_snap(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "t": float(c.t),
+                "hold_sec": float(c.hold_sec),
+                "recorded_at": str(c.recorded_at),
+                "cue_id": str(c.cue_id),
+                "tile": dict(c.tile),
+            }
+            for c in self.cues
+        ]
+
+    def _cues_from_snap(self, snap: list[dict[str, Any]]) -> list[PunchCue]:
+        out: list[PunchCue] = []
+        for item in snap or []:
+            if not isinstance(item, dict) or not isinstance(item.get("tile"), dict):
+                continue
+            try:
+                out.append(
+                    PunchCue(
+                        t=float(item.get("t", 0.0)),
+                        hold_sec=float(item.get("hold_sec", 0.05)),
+                        recorded_at=str(item.get("recorded_at") or ""),
+                        cue_id=str(item.get("cue_id") or f"hist-{len(out)}"),
+                        tile=dict(item["tile"]),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        out.sort(key=lambda c: (c.t, c.cue_id))
+        return out
+
+    def _reset_cue_history(self) -> None:
+        self._cue_hist = [self._cues_to_snap()]
+        self._cue_hist_i = 0
+
+    def _commit_cue_history(self) -> None:
+        """キュー変更後に履歴へ確定（先送り分岐は破棄）。"""
+        snap = self._cues_to_snap()
+        self._cue_hist = self._cue_hist[: self._cue_hist_i + 1]
+        # 連続同一状態は積まない
+        if self._cue_hist and len(self._cue_hist[-1]) == len(snap):
+            same = True
+            for a, b in zip(self._cue_hist[-1], snap):
+                if a.get("cue_id") != b.get("cue_id") or abs(float(a.get("t", 0)) - float(b.get("t", 0))) > 1e-9:
+                    same = False
+                    break
+            if same:
+                return
+        self._cue_hist.append(snap)
+        max_n = 80
+        if len(self._cue_hist) > max_n:
+            overflow = len(self._cue_hist) - max_n
+            self._cue_hist = self._cue_hist[overflow:]
+        self._cue_hist_i = len(self._cue_hist) - 1
+
+    def undo_cues(self) -> bool:
+        if self._cue_hist_i <= 0:
+            return False
+        self._cue_hist_i -= 1
+        self.cues = self._cues_from_snap(self._cue_hist[self._cue_hist_i])
+        self._emit("cues")
+        return True
+
+    def redo_cues(self) -> bool:
+        if self._cue_hist_i >= len(self._cue_hist) - 1:
+            return False
+        self._cue_hist_i += 1
+        self.cues = self._cues_from_snap(self._cue_hist[self._cue_hist_i])
+        self._emit("cues")
+        return True
 
     def set_zoom(self, zoom: float, view_start: float | None = None) -> None:
         self.zoom = max(1.0, min(64.0, float(zoom)))
@@ -1495,12 +1614,14 @@ class LightController:
             )
         out.sort(key=lambda c: (c.t, c.cue_id))
         self.cues = out
+        self._reset_cue_history()
         try:
             self.zoom = max(1.0, min(64.0, float(raw.get("zoom", 1.0))))
             self.view_start = max(0.0, float(raw.get("view_start", 0.0)))
         except (TypeError, ValueError):
             pass
         self._emit("timeline")
+        self._emit("cues")
 
     def shutdown(self) -> None:
         self.stop_playback()

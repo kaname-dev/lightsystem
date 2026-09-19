@@ -417,13 +417,25 @@ def api_timeline_flags(body: FlagsBody) -> dict[str, Any]:
 @app.post("/api/cues/delete")
 def api_cues_delete(body: DeleteCuesBody) -> dict[str, Any]:
     ctrl.delete_cues(body.cue_ids)
-    return {"ok": True}
+    return {"ok": True, "state": ctrl.snapshot()}
 
 
 @app.post("/api/cues/clear")
 def api_cues_clear() -> dict[str, Any]:
     ctrl.clear_cues()
-    return {"ok": True}
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/cues/undo")
+def api_cues_undo() -> dict[str, Any]:
+    ok = ctrl.undo_cues()
+    return {"ok": ok, "state": ctrl.snapshot()}
+
+
+@app.post("/api/cues/redo")
+def api_cues_redo() -> dict[str, Any]:
+    ok = ctrl.redo_cues()
+    return {"ok": ok, "state": ctrl.snapshot()}
 
 
 @app.post("/api/project/save")

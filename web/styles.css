@@ -145,6 +145,11 @@ select, input[type="number"] {
 .tile.active { border-color: #4af; border-width: 3px; }
 .tile .hk { color: #9cf; }
 
+.cue-toolbar { margin-bottom: 8px; }
+.cue-toolbar button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 #cueList {
   width: 100%;
   background: #1e2228;

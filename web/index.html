@@ -26,7 +26,7 @@
   <main>
     <!-- Timeline -->
     <section id="tab-timeline" class="panel active">
-      <p class="hint">Space=再生/停止 ／ ホイール=拡大 ／ Shift+ドラッグ=パン ／ Delete=選択削除</p>
+      <p class="hint">Space=再生/停止 ／ ホイール=拡大 ／ Shift+ドラッグ=パン ／ Delete=選択削除 ／ Ctrl+Z・Y=履歴</p>
       <div class="row wrap">
         <label class="file-btn">
           音楽を開く
@@ -48,7 +48,6 @@
         <label><input type="checkbox" id="chkRecord" /> ポン出しを記録</label>
         <label><input type="checkbox" id="chkAutoplay" checked /> 再生時に自動ポン出し</label>
         <span id="cueStatus">キュー: 0</span>
-        <button type="button" id="btnDelCue">選択削除</button>
         <button type="button" id="btnClearCues">全消去</button>
       </div>
       <div class="split">
@@ -58,7 +57,15 @@
         </div>
         <div>
           <h3>キュー一覧</h3>
+          <div class="row wrap cue-toolbar">
+            <button type="button" id="btnCueSelectAll">全選択</button>
+            <button type="button" id="btnDelCue">選択削除</button>
+            <button type="button" id="btnCueUndo" title="Ctrl+Z">↩ 巻き戻し</button>
+            <button type="button" id="btnCueRedo" title="Ctrl+Y">↪ 先送り</button>
+            <span id="cueHistStatus" class="badge">履歴 —</span>
+          </div>
           <select id="cueList" multiple size="12"></select>
+          <p class="hint">Ctrl / Shift+クリックで複数選択。Delete=選択削除 ／ Ctrl+Z=巻き戻し ／ Ctrl+Y=先送り</p>
         </div>
       </div>
       <select id="projectList" hidden></select>
@@ -109,11 +116,11 @@
 
         <fieldset class="sb-devices">
           <legend>対象機器</legend>
-          <label class="sb-check"><input type="checkbox" id="teLaser" checked /> DMX レーザー</label>
+          <label class="sb-check"><input type="checkbox" id="teLaser" /> DMX レーザー</label>
           <label class="sb-check"><input type="checkbox" id="teLed" /> Bluetooth LED</label>
         </fieldset>
 
-        <section id="teLaserPanel" class="sb-device-panel">
+        <section id="teLaserPanel" class="sb-device-panel" hidden>
           <h4>レーザー設定</h4>
           <label class="sb-check"><input type="checkbox" id="teRunMotion" checked /> モーション自動開始</label>
           <label class="sb-check"><input type="checkbox" id="teDotBase" checked /> 疑似点土台（CH1/2/8）</label>
