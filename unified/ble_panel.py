@@ -5,13 +5,36 @@ from __future__ import annotations
 import importlib.util
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-_BLE_APP = Path(__file__).resolve().parents[1] / "BluetoothLED" / "app"
+_ROOT = Path(__file__).resolve().parents[1]
+_BLE_APP = _ROOT / "BluetoothLED" / "app"
 if str(_BLE_APP) not in sys.path:
     sys.path.insert(0, str(_BLE_APP))
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+# ソフト炎エフェクト（laser_dmx_app の負 mode id と一致）
+_LED_FX_FLAME = -101
+# 旧 ID（ゆらぎ／一閃）も同じ着火→保持にマップ
+_LED_CUSTOM_FX_IDS = frozenset({_LED_FX_FLAME, -102, -103})
+
+try:
+    from app_settings import load_settings, update_settings
+except ImportError:
+
+    def load_settings():  # type: ignore[misc, no-redef]
+        return {
+            "ble_address": "C6:70:45:84:1B:D8",
+            "ble_protocol": "triones",
+            "ble_auto_connect": False,
+        }
+
+    def update_settings(**kwargs):  # type: ignore[misc, no-redef]
+        return kwargs
 
 _spec = importlib.util.spec_from_file_location(
     "ble_led_audio_reactive_panel", _BLE_APP / "audio_reactive.py"
@@ -50,14 +73,34 @@ class BleLedPanel(ttk.Frame):
         self._speed = tk.IntVar(value=50)
         self._status = tk.StringVar(value="未接続")
         self._show_all = tk.BooleanVar(value=False)
-        self._protocol = tk.StringVar(value="triones")
-        self._address = tk.StringVar(value=DEFAULT_ADDRESS)
+        try:
+            _boot = load_settings()
+            addr0 = str(_boot.get("ble_address", "") or "").strip() or DEFAULT_ADDRESS
+            proto0 = str(_boot.get("ble_protocol", "triones") or "triones")
+            if proto0 not in {"auto", "triones", "elk"}:
+                proto0 = "triones"
+            auto0 = bool(_boot.get("ble_auto_connect", False))
+        except Exception:
+            addr0 = DEFAULT_ADDRESS
+            proto0 = "triones"
+            auto0 = False
+        self._protocol = tk.StringVar(value=proto0)
+        self._address = tk.StringVar(value=addr0)
+        self._ble_auto_connect = tk.BooleanVar(value=auto0)
 
         self._ai_active = False
+        self._tile_override_active = False
+        self._tile_override_lit = False
         self._color_busy = False
         self._pending_color: tuple[int, int, int, float] | None = None
         self._mode_busy = False
         self._pending_mode: tuple[int, int] | None = None
+        self._custom_fx_job: str | None = None
+        self._custom_fx_kind: int | None = None
+        self._custom_fx_t0 = 0.0
+        self._custom_fx_base = (255, 120, 20)
+        self._custom_fx_bright = 100.0
+        self._custom_fx_speed = 50
 
         self._style()
         self._build_ui()
@@ -128,6 +171,15 @@ class BleLedPanel(ttk.Frame):
         ttk.Entry(addr_row, textvariable=self._address, width=22).pack(side="left", padx=8)
         ttk.Button(addr_row, text="アドレスで接続", command=self._connect_address).pack(side="left")
 
+        auto_row = ttk.Frame(conn, style="BleCard.TFrame")
+        auto_row.pack(fill="x", pady=(8, 0))
+        ttk.Checkbutton(
+            auto_row,
+            text="起動時にこのアドレスへ自動接続",
+            variable=self._ble_auto_connect,
+            command=self._on_ble_auto_connect_toggled,
+        ).pack(side="left")
+
         self.device_list = tk.Listbox(
             conn,
             height=4,
@@ -162,8 +214,8 @@ class BleLedPanel(ttk.Frame):
             color_frame,
             initial=self._color,
             on_change=self._on_palette_color,
-            width=240,
-            height=200,
+            width=200,
+            height=160,
         )
         self.palette.pack()
 
@@ -272,8 +324,176 @@ class BleLedPanel(ttk.Frame):
             self._ai_mood.set("—")
             self._draw_level(0.0)
 
+    def set_tile_override(self, payload: dict | bool | None) -> None:
+        """
+        ポン出しタイル優先。
+        - dict: LED を即時適用して AI 上書きを止める
+        - True: 色は変えず AI 上書きだけ止める（凍結）
+        - None/False: 優先解除（AI 停止中ならポン出しで点灯した LED を消灯）
+        """
+        if payload is None or payload is False:
+            was = self._tile_override_active
+            lit = bool(getattr(self, "_tile_override_lit", False))
+            self._tile_override_active = False
+            self._tile_override_lit = False
+            self._stop_custom_fx()
+            # AI が動いていないと最後のポン出し色のまま残る → 消灯
+            if was and lit and not self._ai_active:
+                try:
+                    self._power(False)
+                except Exception:
+                    pass
+            return
+        self._tile_override_active = True
+        if payload is True:
+            # 凍結のみ（色は触らない）→ 解除時に消灯しない
+            return
+        if not isinstance(payload, dict):
+            return
+        self._tile_override_lit = True
+        mode = payload.get("mode", None)
+        speed = int(payload.get("speed", 50) or 50)
+        bright = float(payload.get("brightness", 100.0) or 100.0)
+        bright = max(1.0, min(100.0, bright))
+        self._brightness.set(bright)
+        self.bright_label.configure(text=f"{int(bright)}%")
+        r = max(0, min(255, int(payload.get("r", 255))))
+        g = max(0, min(255, int(payload.get("g", 80))))
+        b = max(0, min(255, int(payload.get("b", 40))))
+
+        # ソフト炎などカスタム FX
+        if mode is not None:
+            try:
+                mode_i = int(mode)
+            except (TypeError, ValueError):
+                mode_i = None
+            if mode_i is not None and mode_i in _LED_CUSTOM_FX_IDS:
+                self._color = (r, g, b)
+                try:
+                    self.palette.set_rgb(r, g, b, notify=False)
+                except Exception:
+                    pass
+                self.color_preview.configure(bg=f"#{r:02x}{g:02x}{b:02x}")
+                self.rgb_label.configure(text=f"RGB ({r}, {g}, {b})")
+                self._start_custom_fx(mode_i, r, g, b, bright, speed)
+                return
+
+        if mode is None:
+            self._stop_custom_fx()
+            self._color = (r, g, b)
+            try:
+                self.palette.set_rgb(r, g, b, notify=False)
+            except Exception:
+                pass
+            self.color_preview.configure(bg=f"#{r:02x}{g:02x}{b:02x}")
+            self.rgb_label.configure(text=f"RGB ({r}, {g}, {b})")
+            self._queue_color()
+            try:
+                self._power(True)
+            except Exception:
+                pass
+        else:
+            self._stop_custom_fx()
+            try:
+                mode_i = int(mode)
+            except (TypeError, ValueError):
+                return
+            try:
+                if mode_i in self.mode_ids:
+                    self.mode_combo.current(self.mode_ids.index(mode_i))
+            except Exception:
+                pass
+            self._speed.set(max(1, min(100, speed)))
+            self._pending_mode = (mode_i, max(1, min(100, speed)))
+            self._flush_mode()
+            try:
+                self._power(True)
+            except Exception:
+                pass
+
+    def _stop_custom_fx(self) -> None:
+        jid = self._custom_fx_job
+        self._custom_fx_job = None
+        self._custom_fx_kind = None
+        if jid is not None:
+            try:
+                self.after_cancel(jid)
+            except (tk.TclError, ValueError):
+                pass
+
+    def _start_custom_fx(
+        self,
+        kind: int,
+        r: int,
+        g: int,
+        b: int,
+        bright: float,
+        speed: int,
+    ) -> None:
+        self._stop_custom_fx()
+        self._custom_fx_kind = int(kind)
+        self._custom_fx_base = (r, g, b)
+        self._custom_fx_bright = float(bright)
+        self._custom_fx_speed = max(1, min(100, int(speed)))
+        self._custom_fx_t0 = time.monotonic()
+        try:
+            self._power(True)
+        except Exception:
+            pass
+        self._custom_fx_tick()
+
+    def _flame_rgb(self, intensity: float) -> tuple[int, int, int]:
+        """パレット色を強度でスケール（色は変えず明るさだけ）。"""
+        br, bg, bb = self._custom_fx_base
+        u = max(0.0, min(1.0, float(intensity)))
+        u *= max(0.05, min(1.0, self._custom_fx_bright / 100.0))
+        return int(br * u), int(bg * u), int(bb * u)
+
+    def _custom_fx_tick(self) -> None:
+        self._custom_fx_job = None
+        if not self._tile_override_active or self._custom_fx_kind is None:
+            return
+        elapsed = time.monotonic() - self._custom_fx_t0
+        sp = self._custom_fx_speed
+        # 速度 1..100 → 立ち上がり時間（遅い〜一瞬）。滑らかに最高輝度へ。
+        rise_dur = max(0.04, 0.95 - (sp / 100.0) * 0.90)
+
+        if elapsed < rise_dur:
+            u = elapsed / rise_dur
+            # smoothstep: 最暗から滑らかに最大へ
+            intensity = u * u * (3.0 - 2.0 * u)
+            hold = False
+        else:
+            intensity = 1.0
+            hold = True
+
+        rgb = self._flame_rgb(intensity)
+        self._color = rgb
+        self.color_preview.configure(bg=f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}")
+        self._brightness.set(100.0)
+        self.bright_label.configure(text="100%")
+        self._queue_color()
+
+        if hold:
+            # 最高輝度で保持（以降のチカチカなし）
+            return
+
+        delay = int(max(16, min(40, rise_dur * 1000 / 24)))
+        try:
+            self._custom_fx_job = self.after(delay, self._custom_fx_tick)
+        except tk.TclError:
+            self._custom_fx_job = None
+
     def apply_ai_frame(self, frame: LightingFrame) -> None:
         if not self._ai_active:
+            return
+        if self._tile_override_active:
+            # タイル優先中は解析表示だけ更新し、色は触らない
+            mood_ja = MOOD_LABELS_JA.get(frame.mood, frame.mood)
+            genre_ja = GENRE_LABELS_JA.get(frame.genre, frame.genre)
+            section_ja = SECTION_LABELS_JA.get(frame.section, frame.section)
+            self._ai_mood.set(f"{section_ja}/{genre_ja}/{mood_ja}·タイル優先")
+            self._draw_level(frame.level)
             return
         self._color = (frame.r, frame.g, frame.b)
         bright_pct = max(1.0, min(100.0, frame.brightness * 100.0))
@@ -283,6 +503,9 @@ class BleLedPanel(ttk.Frame):
             bright_pct = min(100.0, max(bright_pct, 70.0 + frame.release * 30.0))
         elif frame.tension > 0.4 and frame.effect == "tension_hold":
             bright_pct = min(bright_pct, 35.0 + (1.0 - frame.tension) * 20.0)
+        # 加速ビート点滅: ON/OFF をはっきり出す
+        if frame.effect == "accel_blink":
+            bright_pct = 100.0 if frame.brightness >= 0.35 or frame.beat else 3.0
         self._brightness.set(bright_pct)
         self.bright_label.configure(text=f"{int(bright_pct)}%")
         self.color_preview.configure(bg=f"#{frame.r:02x}{frame.g:02x}{frame.b:02x}")
@@ -315,12 +538,12 @@ class BleLedPanel(ttk.Frame):
             try:
                 result = future.result()
                 if on_ok:
-                    self.after(0, lambda: on_ok(result))
+                    self.after(0, lambda r=result: on_ok(r))
             except Exception as exc:
                 if on_err:
-                    self.after(0, lambda: on_err(exc))
+                    self.after(0, lambda e=exc: on_err(e))
                 elif not silent:
-                    self.after(0, lambda: messagebox.showerror("エラー", str(exc)))
+                    self.after(0, lambda e=exc: messagebox.showerror("エラー", str(e)))
 
         threading.Thread(target=_watch, daemon=True).start()
 
@@ -361,6 +584,41 @@ class BleLedPanel(ttk.Frame):
             return None
         return self.devices[idx]
 
+    def _on_ble_auto_connect_toggled(self) -> None:
+        self._persist_ble_settings(include_address=True)
+
+    def set_auto_connect(self, enabled: bool) -> None:
+        self._ble_auto_connect.set(bool(enabled))
+
+    def _persist_ble_settings(self, *, include_address: bool = True) -> None:
+        kwargs: dict = {
+            "ble_auto_connect": bool(self._ble_auto_connect.get()),
+            "ble_protocol": str(self._protocol.get() or "triones"),
+        }
+        if include_address:
+            addr = self._address.get().strip()
+            if addr:
+                kwargs["ble_address"] = addr
+        try:
+            update_settings(**kwargs)
+        except Exception:
+            pass
+
+    def try_auto_connect(self) -> None:
+        """保存済みアドレスへ接続を試みる（起動時用）。"""
+        address = self._address.get().strip()
+        if not address:
+            try:
+                address = str(load_settings().get("ble_address", "") or "").strip()
+            except Exception:
+                address = ""
+            if address:
+                self._address.set(address)
+        if not address:
+            self._set_status("自動接続スキップ: アドレス未設定")
+            return
+        self._connect_address()
+
     def _apply_protocol_choice(self) -> None:
         choice = self._protocol.get()
         if choice in {"triones", "elk"}:
@@ -383,6 +641,8 @@ class BleLedPanel(ttk.Frame):
             proto = self.controller.protocol
             char = self.controller.write_char.uuid if self.controller.write_char else "?"
             self._set_status(f"接続済み: {device.name}  [{proto}]  write={char}")
+            self._address.set(device.address)
+            self._persist_ble_settings(include_address=True)
             self._queue_color()
 
         self._run(
@@ -408,6 +668,7 @@ class BleLedPanel(ttk.Frame):
             name = self.controller.device_name or address
             char = self.controller.write_char.uuid if self.controller.write_char else "?"
             self._set_status(f"接続済み: {name}  [{proto}]  write={char}")
+            self._persist_ble_settings(include_address=True)
             self._queue_color()
 
         self._run(
@@ -524,9 +785,13 @@ class BleLedPanel(ttk.Frame):
 
     def shutdown(self) -> None:
         self._ai_active = False
+        self._stop_custom_fx()
         try:
             fut = self.worker.submit(self.controller.disconnect())
-            fut.result(timeout=2)
+            fut.result(timeout=0.6)
         except Exception:
             pass
-        self.worker.stop()
+        try:
+            self.worker.stop()
+        except Exception:
+            pass

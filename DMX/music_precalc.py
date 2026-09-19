@@ -81,17 +81,86 @@ def ensure_audio_buffer(p: TrackProfile) -> bool:
     """再生用 waveform が無いとき source_path から再ロードする。"""
     if p.audio_mono is not None and getattr(p.audio_mono, "size", 0) > 0:
         return True
-    if librosa is None:
+    loaded = load_audio_for_playback(p.source_path, target_sr=int(p.sr) if p.sr else None)
+    if loaded is None:
         return False
-    path = Path(p.source_path)
-    if not path.is_file():
-        return False
-    try:
-        y, _sr = librosa.load(str(path), sr=int(p.sr), mono=True)
-        p.audio_mono = np.asarray(y, dtype=np.float32)
-    except OSError:
-        return False
+    y, sr, _dur = loaded
+    p.audio_mono = y
+    if sr > 0:
+        p.sr = int(sr)
     return True
+
+
+def load_audio_for_playback(
+    path: str | Path,
+    *,
+    target_sr: int | None = 44100,
+) -> tuple[Any, int, float] | None:
+    """解析なしで再生用モノラル波形を読む。(y, sr, duration_sec) または None。
+
+    soundfile → librosa → wav(標準ライブラリ) の順で試す。
+    """
+    path = Path(path)
+    if not path.is_file():
+        return None
+
+    # 1) soundfile（軽量・mp3以外も広い）
+    try:
+        import soundfile as sf  # type: ignore
+
+        data, sr = sf.read(str(path), always_2d=False)
+        y = np.asarray(data, dtype=np.float32)
+        if y.ndim > 1:
+            y = np.mean(y, axis=1).astype(np.float32)
+        sr_i = int(sr)
+        if target_sr is not None and sr_i != int(target_sr) and librosa is not None:
+            y = np.asarray(librosa.resample(y, orig_sr=sr_i, target_sr=int(target_sr)), dtype=np.float32)
+            sr_i = int(target_sr)
+        dur = float(len(y) / max(1, sr_i))
+        return y, sr_i, dur
+    except Exception:
+        pass
+
+    # 2) librosa
+    if librosa is not None:
+        try:
+            y, sr = librosa.load(str(path), sr=target_sr, mono=True)
+            y = np.asarray(y, dtype=np.float32)
+            sr_i = int(sr)
+            dur = float(len(y) / max(1, sr_i))
+            return y, sr_i, dur
+        except Exception:
+            pass
+
+    # 3) 標準 wave（PCM wav のみ）
+    try:
+        import wave
+
+        with wave.open(str(path), "rb") as wf:
+            nch = wf.getnchannels()
+            sw = wf.getsampwidth()
+            sr_i = int(wf.getframerate())
+            nframes = wf.getnframes()
+            raw = wf.readframes(nframes)
+        if sw == 1:
+            arr = np.frombuffer(raw, dtype=np.uint8).astype(np.float32)
+            arr = (arr - 128.0) / 128.0
+        elif sw == 2:
+            arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        elif sw == 4:
+            arr = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+        else:
+            return None
+        if nch > 1:
+            arr = arr.reshape(-1, nch).mean(axis=1)
+        y = np.asarray(arr, dtype=np.float32)
+        if target_sr is not None and sr_i != int(target_sr) and librosa is not None:
+            y = np.asarray(librosa.resample(y, orig_sr=sr_i, target_sr=int(target_sr)), dtype=np.float32)
+            sr_i = int(target_sr)
+        dur = float(len(y) / max(1, sr_i))
+        return y, sr_i, dur
+    except Exception:
+        return None
 
 
 def load_profile_from_json(path: Path) -> TrackProfile:
@@ -160,6 +229,16 @@ def snapshot_at_time(p: TrackProfile, t: float) -> AudioSnapshot:
                 if span > 1e-6:
                     wobble_hz = float(min(32.0, zc / (2.0 * span)))
 
+    # 超細かいゲートに埋もれても、テンポの 3連符（1/3拍）へ寄せる
+    tri_hz = max(70.0, min(190.0, float(p.tempo_bpm))) / 60.0 * 3.0
+    if shake_level > 0.15 and wobble_hz > 10.0:
+        wobble_hz = float(tri_hz)
+        shake_level = max(shake_level, 0.32)
+    elif shake_level > 0.20 and wobble_hz < 3.0 and music:
+        # RMS が平坦でも楽曲テンポの 3連符を仮定（Breakaway 系）
+        wobble_hz = float(tri_hz)
+        shake_level = max(shake_level, 0.28)
+
     lfo_hz, lfo_depth = 0.0, 0.0
     if p.rms_t.size >= 32:
         m = (p.rms_t >= t - 1.28) & (p.rms_t <= t + 1.28)
@@ -179,17 +258,27 @@ def snapshot_at_time(p: TrackProfile, t: float) -> AudioSnapshot:
     transient_level = min(1.0, 0.35 * shake_level + 0.5 * onset_str)
 
     st, ts, hs, cs = _style_from_tempo(p.tempo_bpm)
+    # 3連符帯の揺れでは中高域が立っている想定
     centroid_n = 0.45 + 0.12 * math.sin(t * 0.3) * shake_level
+    if 3.0 <= wobble_hz <= 10.0 and shake_level > 0.2:
+        centroid_n = min(1.0, 0.55 + 0.2 * min(1.0, wobble_hz / 8.0))
     flux_art = transient_level * 0.0004
+
+    mid_v = rms_s * (0.95 if 3.0 <= wobble_hz <= 10.0 else 0.75)
+    high_v = rms_s * (0.90 if 3.0 <= wobble_hz <= 10.0 else 0.55)
+    # 高いとがった電子音: テンポ由来の反復位相（ファイル同期）
+    pulse_hz = float(wobble_hz) if 3.0 <= wobble_hz <= 10.5 else float(tri_hz)
+    high_point = float(min(1.0, 0.35 + high_v * 0.5 + shake_level * 0.3)) if music else 0.0
+    pulse_phasor = (t * pulse_hz) % 2.0
 
     return AudioSnapshot(
         rms=rms_s,
         rms_smooth=rms_s,
         bass=rms_s * 0.9,
-        mid=rms_s * 0.75,
-        high=rms_s * 0.55,
-        centroid_hz=1800.0 + 2200.0 * centroid_n,
-        centroid_norm=max(0.0, min(1.0, centroid_n)),
+        mid=mid_v,
+        high=high_v,
+        centroid_hz=3200.0 + 1800.0 * centroid_n,
+        centroid_norm=max(0.0, min(1.0, max(centroid_n, 0.62 if high_point > 0.4 else centroid_n))),
         flux=flux_art,
         flux_smooth=flux_art,
         bpm=ibpm,
@@ -212,6 +301,10 @@ def snapshot_at_time(p: TrackProfile, t: float) -> AudioSnapshot:
         shake_generation=0,
         lfo_hz=lfo_hz,
         lfo_depth=lfo_depth,
+        synth_pulse_hz=pulse_hz if high_point >= 0.2 else 0.0,
+        synth_pulse_phasor=pulse_phasor,
+        high_point_level=high_point,
+        synth_tip_ratio=float(min(2.5, 0.55 + high_v * 1.6)) if music and high_point >= 0.2 else 0.0,
     )
 
 
@@ -284,9 +377,45 @@ def analyze_audio_file(
             events.append((rp, "pew"))
 
     step = 2 if tempo_f < 130 else 3
+    beat_period = 60.0 / max(70.0, tempo_f)
+    third = beat_period / 3.0
     for k, bt in enumerate(beat_times):
         if k % step == 0:
             events.append((float(bt), "shake"))
+        # 1/3 拍ごとの左右切替用イベント
+        for j in (0, 1, 2):
+            events.append((float(bt) + j * third, "shake"))
+
+    # 中高域の振幅変調が 3–10Hz（3連符帯）の区間だけ揺れイベントに
+    try:
+        S = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop))
+        freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+        band = (freqs >= 350.0) & (freqs <= 4500.0)
+        if np.any(band) and S.shape[1] > 16:
+            synth_env = np.mean(S[band], axis=0)
+            synth_env = synth_env / max(1e-9, float(np.max(synth_env)))
+            synth_t = librosa.frames_to_time(np.arange(len(synth_env)), sr=sr, hop_length=hop)
+            hop_sec = float(synth_t[1] - synth_t[0]) if len(synth_t) > 1 else 0.02
+            win = max(10, int(0.45 / max(1e-6, hop_sec)))
+            stride = max(1, win // 3)
+            for i in range(0, len(synth_env) - win, stride):
+                seg = synth_env[i : i + win]
+                mu = float(np.mean(seg))
+                if mu < 0.08:
+                    continue
+                dseg = np.diff(seg)
+                if dseg.size < 6:
+                    continue
+                sg = np.sign(dseg)
+                sg[sg == 0.0] = 1.0
+                zc = int(np.sum(np.abs(np.diff(sg)) > 0))
+                span = float(win) * hop_sec
+                wob = zc / (2.0 * max(1e-6, span))
+                cv = float(np.std(seg) / max(1e-9, mu))
+                if 3.0 <= wob <= 10.0 and cv >= 0.05:
+                    events.append((float(synth_t[i + win // 2]), "shake"))
+    except Exception:
+        pass
 
     events.sort(key=lambda x: (x[0], {"pew": 0, "impact": 1, "shake": 2}[x[1]]))
 
@@ -294,9 +423,13 @@ def analyze_audio_file(
     last_t = -1.0
     merge_gap = 0.055
     for tt, kk in events:
-        if tt - last_t < merge_gap:
+        # シンセ揺れは少し密に残す
+        gap = 0.040 if kk == "shake" else merge_gap
+        if tt - last_t < gap:
             if dedup and kk == "pew" and dedup[-1][1] != "pew":
                 dedup[-1] = (dedup[-1][0], "pew")
+            elif dedup and kk == "shake" and dedup[-1][1] != "shake" and tt - last_t >= 0.028:
+                dedup[-1] = (dedup[-1][0], "shake")
             continue
         dedup.append((tt, kk))
         last_t = tt

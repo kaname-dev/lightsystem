@@ -1,0 +1,10 @@
+{
+  "dmx_com_port": "COM12",
+  "dmx_base_addr": 1,
+  "dmx_auto_connect": true,
+  "ble_address": "C6:70:45:84:1B:D8",
+  "ble_protocol": "triones",
+  "ble_auto_connect": true,
+  "audio_input_label": "55: CABLE Output (VB-Audio Point) (Windows WDM-KS)",
+  "audio_input_id": 55
+}

@@ -75,6 +75,7 @@ EFFECT_LABELS_JA = {
     "subbass+vibrato": "重低音+ビブラート",
     "tension_hold": "溜め",
     "drop_hit": "解放",
+    "accel_blink": "加速点滅",
 }
 
 
@@ -348,14 +349,18 @@ class SectionDetector:
         self.section = "silent"
         self._last_switch = 0.0
         self._music_started = 0.0
+        self._music_frames = 0
+        self._frame_i = 0
         self._peak_level = 0.0
         self._baseline = 0.12  # slow bed level (verse/intro reference)
         self._chorus_hits = 0
         self._declining = 0.0
         self._chorus_until = 0.0
+        self._build_score = 0.0  # 持続するビルド確信度（一瞬の上昇でサビへ飛ばない）
 
     def update(self, features: dict, song_bright: float) -> str:
-        now = time.monotonic()
+        self._frame_i += 1
+        now = self._frame_i * (BLOCK_MS / 1000.0)
         # Prefer pre-AGC level so intro stays quieter than chorus after normalization
         level = float(features.get("raw_level", features.get("music_level", 0.0)))
         rich = float(features.get("richness", 0.0))
@@ -363,7 +368,8 @@ class SectionDetector:
         flux = float(features.get("flux", 0.0))
         bass = float(features.get("bass", 0.0)) + float(features.get("sub_bass", 0.0))
         presence = float(features.get("presence", 0.0))
-        onset = 1.0 if features.get("onset") else 0.0
+        # ロール検知用: micro_onset があれば優先（通常 onset は 0.22s ゲートで疎）
+        onset = 1.0 if (features.get("micro_onset") or features.get("onset")) else 0.0
         speech = float(features.get("speech", 0.0))
         music_gate = float(features.get("music_level", level))
 
@@ -372,6 +378,7 @@ class SectionDetector:
                 self.section = "silent"
                 self._last_switch = now
                 self._music_started = 0.0
+                self._build_score = 0.0
             return self.section
 
         for hist, val in (
@@ -400,20 +407,41 @@ class SectionDetector:
         bass_m = float(np.mean(self._bass_hist[-15:]))
         dense_m = float(np.mean(self._presence_hist[-15:]))
         onset_rate = float(np.mean(self._onset_hist[-30:])) * 25.0
+        onset_recent = float(np.mean(self._onset_hist[-12:])) * 25.0
+        onset_older = (
+            float(np.mean(self._onset_hist[-45:-20])) * 25.0
+            if len(self._onset_hist) >= 45
+            else onset_recent
+        )
+        flux_recent = float(np.mean(self._flux_hist[-10:]))
+        flux_older = (
+            float(np.mean(self._flux_hist[-40:-18]))
+            if len(self._flux_hist) >= 40
+            else flux_recent
+        )
+        bright_recent = float(np.mean(self._bright_hist[-10:]))
+        bright_older = (
+            float(np.mean(self._bright_hist[-40:-18]))
+            if len(self._bright_hist) >= 40
+            else bright_recent
+        )
 
         if music_gate < 0.03 and level_m < 0.04:
             cand = "silent"
             self._music_started = 0.0
             self._peak_level *= 0.97
             self._baseline = 0.92 * self._baseline + 0.08 * 0.02
+            self._build_score = 0.0
         else:
             if self._music_started <= 0.0:
                 self._music_started = now
-            music_age = now - self._music_started
+                self._music_frames = 0
+            self._music_frames += 1
+            music_age = self._music_frames * (BLOCK_MS / 1000.0)
             self._peak_level = max(self._peak_level * 0.997, level_m)
 
-            # First ~5s: learn baseline — treat as intro (real-time ~5s of music)
-            if music_age < 5.5:
+            # 最初の短い時間は baseline 学習。高域ロールが来たら intro に閉じ込めない
+            if music_age < 1.2:
                 self._baseline = 0.75 * self._baseline + 0.25 * recent
                 cand = "intro"
             else:
@@ -423,9 +451,12 @@ class SectionDetector:
                 if self.section in {"chorus", "drop"}:
                     self._baseline = 0.998 * self._baseline + 0.002 * min(p30, self._baseline)
                 else:
-                    self._baseline = 0.93 * self._baseline + 0.07 * p30
+                    # intro 中も baseline をゆっくり更新
+                    blend = 0.12 if music_age < 5.5 else 0.07
+                    self._baseline = (1.0 - blend) * self._baseline + blend * p30
 
-                rising = recent > older * 1.18 + 0.04
+                rising = recent > older * 1.14 + 0.025
+                mild_rising = recent > older * 1.06 + 0.012
                 falling = recent < older * 0.80 and music_age > 14.0
                 if falling:
                     self._declining = min(1.0, self._declining + 0.1)
@@ -434,51 +465,110 @@ class SectionDetector:
 
                 vs_base = recent / max(self._baseline, 0.08)
                 vs_mid = recent / max(p60, 0.08)
-                chorus_like = (
-                    vs_base > 1.45
-                    and recent > self._baseline + 0.12
-                    and dense_m > 0.22
-                    and (rich > 0.35 or flux_m > 0.12 or onset_rate > 0.5)
+                densifying = (
+                    onset_recent > onset_older * 1.15 + 0.04
+                    or flux_recent > flux_older * 1.20 + 0.01
+                    or bright_recent > bright_older + 0.035
+                    or onset_rate >= 5.5  # ~16分ロール帯
                 )
+                # Breakaway 型: 高域16分ロール自体がビルドシグナル
+                hat_roll = onset_rate >= 6.0 and onset_recent >= 4.5
+                # まだピーク前の上昇・ロール詰め込み → ビルド
+                build_like = (
+                    (
+                        vs_base > 1.05
+                        and recent > self._baseline + 0.02
+                        and vs_base < 1.75
+                        and (
+                            (rising and vs_base > 1.12)
+                            or (mild_rising and densifying)
+                            or (densifying and (flux_m > 0.04 or onset_rate > 0.8))
+                            or (rising and densifying)
+                            or hat_roll
+                        )
+                    )
+                    or (hat_roll and music_age > 1.2 and self.section not in {"chorus", "drop"})
+                )
+                if music_age < 5.5 and not build_like and not densifying and not hat_roll:
+                    cand = "intro"
+                    # fall through only for early ambient; otherwise evaluate below
+                    early_intro = True
+                else:
+                    early_intro = False
+                # 明確なサビ（ビルドより高いバー）
+                chorus_like = (
+                    vs_base > 1.55
+                    and recent > self._baseline + 0.14
+                    and dense_m > 0.24
+                    and (rich > 0.38 or flux_m > 0.14 or onset_rate > 0.65)
+                    and not (build_like and rising and vs_base < 1.62)
+                    and not hat_roll
+                )
+                peak_chorus = vs_base > 1.75 and dense_m > 0.28 and rich > 0.35 and not hat_roll
                 drop_like = (
                     bass_m > 0.42 and rising and vs_base > 1.5 and song_bright < 0.55
                 )
 
-                if now < self._chorus_until and self.section in {"chorus", "drop"}:
-                    if recent > self._baseline * 1.15 or vs_mid > 1.05:
-                        cand = self.section
-                    else:
-                        cand = "bridge" if self._chorus_hits else "verse"
-                elif (
-                    self._chorus_hits > 0
-                    and recent < self._peak_level * 0.48
-                    and self.section in {"chorus", "drop", "build"}
-                ):
-                    cand = "bridge"
-                elif drop_like:
-                    cand = "drop"
-                    self._chorus_until = now + 3.5
-                    self._chorus_hits += 1
-                elif chorus_like or (vs_base > 1.7 and dense_m > 0.28 and rich > 0.35):
-                    cand = "chorus"
-                    self._chorus_until = now + 4.5
-                    self._chorus_hits += 1
-                elif rising and vs_base > 1.25 and recent > self._baseline + 0.08:
-                    cand = "build"
-                elif self._declining > 0.5 and falling and music_age > 22.0:
-                    cand = "outro"
-                elif (
-                    self._chorus_hits > 0
-                    and recent < self._baseline * 1.2
-                    and music_age > 12.0
-                ):
-                    cand = "bridge" if dense_m < 0.28 else "verse"
+                if early_intro:
+                    cand = "intro"
+                    self._build_score = max(0.0, self._build_score - 0.05)
                 else:
-                    cand = "verse"
+                    if build_like or hat_roll:
+                        self._build_score = min(1.0, self._build_score + (0.20 if hat_roll else 0.14))
+                    elif self.section == "build" and (mild_rising or densifying or hat_roll) and vs_base < 1.70:
+                        self._build_score = min(1.0, self._build_score + 0.08)
+                    else:
+                        self._build_score = max(0.0, self._build_score - 0.10)
+
+                    if now < self._chorus_until and self.section in {"chorus", "drop"}:
+                        if recent > self._baseline * 1.15 or vs_mid > 1.05:
+                            cand = self.section
+                        else:
+                            cand = "bridge" if self._chorus_hits else "verse"
+                    elif (
+                        self._chorus_hits > 0
+                        and recent < self._peak_level * 0.48
+                        and self.section in {"chorus", "drop", "build"}
+                    ):
+                        cand = "bridge"
+                    elif drop_like and self._build_score < 0.35 and not hat_roll:
+                        cand = "drop"
+                        self._chorus_until = now + 3.5
+                        self._chorus_hits += 1
+                    # ビルドをサビより先に確定（上昇中に chorus_like で飛ばされるのを防ぐ）
+                    elif self._build_score >= 0.35 or (
+                        build_like and self.section in {"verse", "bridge", "intro", "build", "hold", "silent"}
+                    ):
+                        if (chorus_like or peak_chorus) and self._build_score < 0.35 and not rising and not hat_roll:
+                            cand = "chorus"
+                            self._chorus_until = now + 4.5
+                            self._chorus_hits += 1
+                            self._build_score = 0.0
+                        else:
+                            cand = "build"
+                    elif chorus_like or peak_chorus:
+                        cand = "chorus"
+                        self._chorus_until = now + 4.5
+                        self._chorus_hits += 1
+                        self._build_score = 0.0
+                    elif self._declining > 0.5 and falling and music_age > 22.0:
+                        cand = "outro"
+                    elif (
+                        self._chorus_hits > 0
+                        and recent < self._baseline * 1.2
+                        and music_age > 12.0
+                    ):
+                        cand = "bridge" if dense_m < 0.28 else "verse"
+                    elif music_age < 5.5:
+                        cand = "intro"
+                    else:
+                        cand = "verse"
 
         if cand != self.section:
             fast = {"chorus", "drop", "build"}
-            dwell = 0.7 if cand in fast or self.section in fast else 1.8
+            dwell = 0.55 if cand in fast or self.section in fast else 1.8
+            if cand == "build" or self.section == "build":
+                dwell = 0.40  # ビルドへ素早く入る／維持しやすい
             if self.section == "silent" or cand == "silent":
                 dwell = 0.5
             if now - self._last_switch > dwell:
@@ -607,7 +697,16 @@ class AudioAnalyzer:
         self._bass_fast = 0.0
         self._flux_slow = 0.0
         self._onset_cooldown = 0.0
+        # ロール／加速点滅用: 短いクールダウン（ビート用 0.22s だと ~4.5Hz 上限で点滅不能）
+        self._micro_onset_cooldown = 0.0
+        self._samples_seen = 0
+        self._micro_cooldown_until_sample = 0
+        self._onset_cooldown_until_sample = 0
         self._prev_spectrum: np.ndarray | None = None
+        self._prev_hat_spec: np.ndarray | None = None
+        self._hat_flux_slow = 0.0
+        self._hat_fast = 0.0
+        self._hat_slow = 0.0
         self._prev_raw_rms = 0.0
         self._peak_freq_hist: list[float] = []
         self._sub_ema = 0.0
@@ -720,20 +819,95 @@ class AudioAnalyzer:
         self._bass_slow = 0.90 * self._bass_slow + 0.10 * (bass_p + sub_p)
         self._flux_slow = 0.85 * self._flux_slow + 0.15 * flux
 
+        # スネア・ビルドアップ（Breakaway: ~128BPM 16分 ≈ 8.3Hz, gap≈120ms）
+        # クラック帯 0.9–5kHz（キック/シンバル誤検知を避ける）
+        snare_mask = (freqs >= 900.0) & (freqs < 5000.0)
+        kick_mask = (freqs >= 30.0) & (freqs < 180.0)
+        cym_mask = (freqs >= 5500.0) & (freqs < 8000.0)
+        snare_energy = float(np.sum(power[snare_mask]) + 1e-12)
+        kick_energy = float(np.sum(power[kick_mask]) + 1e-12)
+        cym_energy = float(np.sum(power[cym_mask]) + 1e-12)
+        snare_dom = snare_energy / (snare_energy + kick_energy * 0.85 + cym_energy * 0.9 + 1e-12)
+        hat_spec = spectrum[snare_mask]
+        hat_flux = 0.0
+        if self._prev_hat_spec is not None and self._prev_hat_spec.shape == hat_spec.shape:
+            d = np.maximum(hat_spec - self._prev_hat_spec, 0.0)
+            hat_flux = float(np.sqrt(np.mean(d * d)))
+        self._prev_hat_spec = hat_spec.copy()
+        self._hat_flux_slow = 0.72 * self._hat_flux_slow + 0.28 * hat_flux
+        self._hat_fast = 0.55 * self._hat_fast + 0.45 * snare_energy
+        self._hat_slow = 0.92 * self._hat_slow + 0.08 * snare_energy
+
+        # スネア帯のみでサブブロック peak（広帯域 diff は誤検知が多い）
+        sub_n = 4
+        sub_len = max(16, len(raw) // sub_n)
+        sub_scores: list[float] = []
+        for si in range(sub_n):
+            seg = raw[si * sub_len : (si + 1) * sub_len]
+            if seg.size < 16:
+                continue
+            win = seg * np.hanning(seg.size)
+            sp = np.abs(np.fft.rfft(win))
+            # rfft 周波数はブロック長基準なのでマスクを再計算
+            sf = np.fft.rfftfreq(seg.size, d=1.0 / self.sample_rate)
+            sm = (sf >= 900.0) & (sf < 5000.0)
+            e = float(np.sqrt(np.sum((sp[sm] ** 2)) + 1e-12))
+            pk = float(np.max(sp[sm])) if np.any(sm) else 0.0
+            sub_scores.append(pk * 0.55 + e * 0.45)
+        hat_sub_hit = False
+        if len(sub_scores) >= 2 and snare_dom > 0.08:
+            arr = np.asarray(sub_scores, dtype=np.float64)
+            local = float(np.max(arr))
+            bed = float(np.median(arr))
+            hat_sub_hit = local > bed * 1.12 + 1e-6
+        hat_flux_hit = hat_flux > self._hat_flux_slow * 1.25 + 1e-6 and snare_dom > 0.12
+        hat_energy_hit = self._hat_fast > self._hat_slow * 1.15 + 1e-9 and snare_dom > 0.14
+        hat_hit = hat_sub_hit or (hat_flux_hit and hat_energy_hit)
+
         raw_jump = raw_rms > self._prev_raw_rms * 1.75 + 0.003 and speech < 0.55
         energy_hit = self._energy_fast > self._energy_slow * 1.38 + 1e-7
         bass_hit = self._bass_fast > self._bass_slow * 1.42 + 1e-9
         flux_hit = flux > self._flux_slow * 1.65 + 1e-5
-        now = time.monotonic()
+        self._samples_seen += int(raw.size)
+        now_samp = self._samples_seen
         onset = False
+        micro_onset = False
         music_hit = bass_hit or (energy_hit and speech < 0.55) or (flux_hit and speech < 0.6)
-        if (music_hit or raw_jump) and now >= self._onset_cooldown:
+        hit_ok = False
+        if music_hit or raw_jump:
             if speech < 0.7 or (bass_p + sub_p + high_p) > speech_core_p * 0.4:
                 if raw_rms > self._noise_rms * 2.5 or raw_peak > 0.02:
-                    onset = True
-                    # Longer cooldown reduces strobe from dense micro-onsets
-                    self._onset_cooldown = now + 0.22
+                    hit_ok = True
+        if hit_ok and now_samp >= self._onset_cooldown_until_sample:
+            onset = True
+            # Longer cooldown reduces strobe from dense micro-onsets (beat flash)
+            self._onset_cooldown_until_sample = now_samp + int(0.22 * self.sample_rate)
+        soft_flux = flux > self._flux_slow * 1.22 + 1e-6
+        soft_energy = self._energy_fast > self._energy_slow * 1.15 + 1e-7
+        soft_raw = raw_rms > self._prev_raw_rms * 1.28 + 0.0012
+        # ロール用 micro: スネア帯。マイク劣化でも拾えるよう緩く
+        micro_floor = raw_rms > self._noise_rms * 1.05 or raw_peak > 0.004 or hat_sub_hit
+        micro_hit = (
+            speech < 0.70
+            and micro_floor
+            and snare_dom > 0.08
+            and (
+                hat_sub_hit
+                or hat_flux_hit
+                or hat_energy_hit
+                or (hat_hit and soft_flux)
+                or (soft_flux and snare_dom > 0.16 and soft_raw)
+            )
+        )
+        if micro_hit and now_samp >= self._micro_cooldown_until_sample:
+            micro_onset = True
+            # 終盤の32分(~60ms@128BPM)も拾う。最大 ~20Hz
+            self._micro_cooldown_until_sample = now_samp + int(0.048 * self.sample_rate)
         self._prev_raw_rms = 0.7 * self._prev_raw_rms + 0.3 * raw_rms
+        # 互換: 古い monotonic クーダウンも更新（未使用）
+        now = time.monotonic()
+        self._onset_cooldown = now
+        self._micro_onset_cooldown = now
 
         level = float(np.clip((rms - 0.015) / 0.32, 0.0, 1.0))
         # Pre-AGC dynamics with headroom (>1 allowed) for intro vs chorus contrast
@@ -746,6 +920,7 @@ class AudioAnalyzer:
             music_level *= 0.15
             raw_level *= 0.15
             onset = False
+            micro_onset = False
         # Spectral richness (how many bands are active) — choruses fill the spectrum
         band_powers = np.array(
             [sub_p, bass_p, low_inst_p, low_mid_p, mid_p, presence_p, sparkle_p, high_p],
@@ -798,6 +973,9 @@ class AudioAnalyzer:
             "flux": flux_n,
             "vibrato": float(vibrato),
             "onset": onset,
+            "micro_onset": micro_onset,
+            "block_sec": float(raw.size) / float(self.sample_rate),
+            "snare_dom": float(snare_dom),
         }
 
     def _estimate_vibrato(self, freqs: np.ndarray, power: np.ndarray, mid_presence: float) -> float:
@@ -866,6 +1044,9 @@ class AudioAnalyzer:
             "flux": 0.0,
             "vibrato": 0.0,
             "onset": False,
+            "micro_onset": False,
+            "block_sec": BLOCK_MS / 1000.0,
+            "snare_dom": 0.0,
         }
 
 
@@ -910,6 +1091,20 @@ class MoodRhythmMapper:
         self._style_hold_until = 0.0
         self._display_genre = "calm_ambient"
         self._genre_hold_until = 0.0
+        # 加速ビート／ロール点滅（onset 間隔の短縮＝加速を実測）
+        self._roll_onset_times: list[float] = []
+        self._roll_hz = 0.0
+        self._roll_phase = 0.0
+        self._roll_active = 0.0  # 0–1 エンベロープ
+        self._accel_score = 0.0  # 0–1 加速確信度
+        self._accel_until = 0.0
+        self._audio_t = 0.0
+        self._roll_last_t = 0.0
+        self._roll_gap_hist: list[float] = []
+        self._blink_latch_until = 0.0  # 一度発火したら欠落でも点滅を維持
+        self._roll_miss_grace = 0.0
+        self._roll_end_streak = 0  # 終了判定の連続フレーム（フリッカー防止）
+        self._blink_sticky_until = 0.0  # 点滅開始後はスネア停止まで粘る
 
     def set_mode(self, mode: ReactionMode | str) -> None:
         if isinstance(mode, str):
@@ -988,6 +1183,252 @@ class MoodRhythmMapper:
         if speech > 0.65:
             beat = False
 
+
+        # --- 加速点滅: スネア・ビルドアップの16分ロール（Breakaway≈8.3Hz） ---
+        # セクション確定を待たず、スネア onset を常時バッファしてからゲートする
+        block_sec = float(features.get("block_sec", BLOCK_MS / 1000.0) or (BLOCK_MS / 1000.0))
+        block_sec = float(np.clip(block_sec, 0.01, 0.12))
+        self._audio_t += block_sec
+        now_roll = self._audio_t
+        dt_roll = max(1e-3, min(0.12, now_roll - self._roll_last_t))
+        self._roll_last_t = now_roll
+        build_pressure = float(getattr(self.sections, "_build_score", 0.0) or 0.0)
+        latched = now_roll < self._blink_latch_until
+        micro_onset = bool(features.get("micro_onset", False))
+
+        # 常時バッファ（ビルド前のスネアロールを捨てない）
+        if speech < 0.70 and self._level_fast > 0.006 and micro_onset:
+            if not self._roll_onset_times or (now_roll - self._roll_onset_times[-1]) >= 0.040:
+                self._roll_onset_times.append(now_roll)
+                self._roll_miss_grace = now_roll + 0.55
+        self._roll_onset_times = [t for t in self._roll_onset_times if now_roll - t < 2.8]
+        n_on = len(self._roll_onset_times)
+        added = bool(micro_onset and n_on > 0 and abs(self._roll_onset_times[-1] - now_roll) < 1e-6)
+
+        accelerating = False
+        densifying = False
+        dense_roll = False
+        steady_16th = False
+        rate_hz = 0.0
+        regular = False
+        if n_on >= 3:
+            recent_n = sum(1 for t in self._roll_onset_times if now_roll - t <= 1.00)
+            older_n = sum(1 for t in self._roll_onset_times if 1.00 < now_roll - t <= 2.00)
+            rate_hz = recent_n / 1.00
+            older_hz = older_n / 1.00
+            if rate_hz >= 3.5:
+                self._roll_hz = float(np.clip(0.55 * self._roll_hz + 0.45 * rate_hz, 2.0, 28.0))
+            dense_roll = rate_hz >= 5.5 and recent_n >= 4
+            rate_up = rate_hz >= older_hz * 1.12 + 0.5 and rate_hz >= 5.0 and older_n >= 2
+            in_snare_band = 5.5 <= rate_hz <= 20.0
+
+            gaps = np.diff(np.asarray(self._roll_onset_times[-16:], dtype=np.float64))
+            gaps = gaps[(gaps >= 0.038) & (gaps <= 0.34)]
+            if gaps.size >= 2:
+                mid = max(1, gaps.size // 2)
+                early_g = gaps[:mid]
+                late_g = gaps[mid:] if gaps.size - mid >= 1 else gaps[-1:]
+                early = float(np.median(early_g))
+                late = float(np.median(late_g))
+                gap_hz = float(np.clip(1.0 / max(1e-3, late), 2.0, 28.0))
+                self._roll_hz = float(np.clip(0.4 * self._roll_hz + 0.6 * gap_hz, 2.0, 28.0))
+                med_g = float(np.median(gaps))
+                pause_reject = float(np.max(gaps)) > max(med_g * 2.5, med_g + 0.16)
+                gap_cv = float(np.std(gaps) / max(1e-3, med_g))
+                regular = gap_cv < 0.55 and not pause_reject
+                early_ok = 0.060 <= early <= 0.28
+                late_ok = 0.060 <= late <= 0.24
+                ratio = early / max(1e-3, late)
+                abs_gain = early - late
+                if gaps.size >= 3:
+                    xs = np.arange(gaps.size, dtype=np.float64)
+                    slope = float(np.polyfit(xs, gaps, 1)[0])
+                else:
+                    slope = -abs_gain
+                late_cv = float(np.std(late_g) / max(1e-3, late)) if late_g.size else 1.0
+                mono = float(np.mean(late_g)) <= float(np.mean(early_g)) * 0.97
+                strong = (
+                    early_ok and late_ok and regular and late < early
+                    and ratio >= 1.08 and abs_gain >= 0.008 and slope < -0.001
+                )
+                mild = (
+                    early_ok and late_ok and regular and late <= early * 0.98
+                    and ratio >= 1.04 and (slope <= 0.0 or mono) and late_cv < 0.65
+                )
+                # 16〜32分の定常／加速ロール
+                steady_16th = (
+                    regular
+                    and in_snare_band
+                    and 0.048 <= late <= 0.160
+                    and 0.048 <= early <= 0.180
+                )
+                accelerating = strong or mild or rate_up
+                densifying = steady_16th or (
+                    regular and early_ok and late_ok and late <= 0.160 and rate_hz >= 5.5
+                )
+                self._roll_gap_hist = gaps.tolist()[-10:]
+            elif dense_roll and in_snare_band:
+                densifying = True
+                accelerating = rate_up
+
+        last_onset_age = (
+            (now_roll - self._roll_onset_times[-1]) if self._roll_onset_times else 9.0
+        )
+        # 序盤の早期発火: 3発以上で16〜32分間隔なら即ロール扱い
+        early_16th = False
+        if n_on >= 3 and last_onset_age < 0.22:
+            eg = np.diff(np.asarray(self._roll_onset_times[-6:], dtype=np.float64))
+            eg = eg[(eg >= 0.045) & (eg <= 0.180)]
+            if eg.size >= 2:
+                emed = float(np.median(eg))
+                ecv = float(np.std(eg) / max(1e-3, emed))
+                if ecv < 0.60:
+                    early_16th = True
+                    self._roll_hz = float(
+                        np.clip(max(self._roll_hz, 1.0 / max(1e-3, emed)), 5.0, 22.0)
+                    )
+        # 本物の16分ロールのみ（通常ビート/ハット連打は除外）
+        snare_roll_live = (
+            dense_roll
+            or steady_16th
+            or early_16th
+            or (accelerating and rate_hz >= 5.5 and regular)
+        ) if n_on >= 3 else False
+
+        # ロール終了: ドロップは強い解放のみ。点滅中は欠落に強く、無ヒットが続いたら終了
+        recent_short = sum(1 for t in self._roll_onset_times if now_roll - t <= 0.55)
+        recent_short_hz = recent_short / 0.55
+        sticky = now_roll < self._blink_sticky_until
+        hard_end = (
+            (self._section == "outro")
+            or (self._tension_phase == "release" and self._release > 0.72 and last_onset_age > 0.25)
+            or (self._section == "drop" and self._release > 0.60 and last_onset_age > 0.30)
+        )
+        if sticky or self._roll_active > 0.35 or self._accel_score > 0.45:
+            # 点滅中: 約0.5s無ヒットかつ低密度のみ終了（途中切れ防止）
+            soft_end = last_onset_age > 0.52 and recent_short_hz < 2.2
+        else:
+            soft_end = (
+                last_onset_age > 0.32
+                or (recent_short_hz < 2.8 and last_onset_age > 0.22)
+            )
+        if hard_end:
+            self._roll_end_streak = 12
+        elif soft_end:
+            self._roll_end_streak = min(16, self._roll_end_streak + 1)
+        else:
+            self._roll_end_streak = max(0, self._roll_end_streak - 3)
+        roll_ended = hard_end or self._roll_end_streak >= 10
+        if roll_ended:
+            snare_roll_live = False
+            latched = False
+            self._blink_latch_until = 0.0
+            self._roll_miss_grace = 0.0
+            self._blink_sticky_until = 0.0
+
+        # 開始用ゲート: セクション誤判定だけでは点滅しない
+        in_buildup = (
+            self._section in {"build", "hold"}
+            or (self._tension_phase == "hold" and self._tension > 0.32)
+            or (build_pressure >= 0.42 and self._section in {"intro", "verse", "bridge", "build", "hold"})
+            or snare_roll_live
+            or latched
+            or sticky
+        )
+
+        if hard_end:
+            in_buildup = False
+            snare_roll_live = False
+            latched = False
+            sticky = False
+            self._blink_latch_until = 0.0
+            self._blink_sticky_until = 0.0
+
+        # 開始は加速/高密度16分のみ。sticky単独では開始しない
+        true_accel = accelerating or densifying or dense_roll or early_16th or steady_16th
+        enter_blink = (not roll_ended) and true_accel and n_on >= 4 and self._roll_hz >= 6.0 and (
+            snare_roll_live or accelerating
+        ) and (
+            in_buildup
+            or build_pressure >= 0.30
+            or rate_hz >= 6.5
+        )
+
+        if roll_ended or (not in_buildup and not latched and not sticky):
+            decay_a = 0.40 if roll_ended else 0.25
+            decay_r = 0.45 if roll_ended else 0.28
+            self._accel_score = max(0.0, self._accel_score - decay_a)
+            self._accel_until = 0.0
+            self._roll_active = max(0.0, self._roll_active - decay_r)
+            self._roll_hz *= 0.85 if roll_ended else 0.92
+            if roll_ended:
+                self._blink_latch_until = 0.0
+                self._blink_sticky_until = 0.0
+        elif enter_blink:
+            boost = 0.75 if accelerating or early_16th else 0.50
+            self._accel_score = min(1.0, max(self._accel_score, 0.55) + boost)
+            self._roll_active = min(1.0, max(self._roll_active, 0.35) + 0.55)
+            self._accel_until = now_roll + 0.90
+            self._blink_latch_until = max(self._blink_latch_until, now_roll + 0.75)
+            self._blink_sticky_until = max(self._blink_sticky_until, now_roll + 0.95)
+            self._roll_end_streak = 0
+        elif (latched or sticky) and (added or snare_roll_live or last_onset_age < 0.40):
+            # 点滅中は欠落に強く維持（開始条件は緩くしない）
+            self._accel_score = max(self._accel_score, 0.55)
+            self._accel_until = max(self._accel_until, now_roll + 0.70)
+            self._roll_active = max(self._roll_active, 0.42)
+            if added or last_onset_age < 0.28:
+                self._blink_latch_until = max(self._blink_latch_until, now_roll + 0.70)
+                self._blink_sticky_until = max(self._blink_sticky_until, now_roll + 0.85)
+            self._roll_end_streak = max(0, self._roll_end_streak - 3)
+        elif (latched or sticky) and last_onset_age > 0.48:
+            self._blink_latch_until = min(self._blink_latch_until, now_roll + 0.12)
+            self._accel_score = max(0.0, self._accel_score - 0.08)
+            self._roll_active = max(0.0, self._roll_active - 0.10)
+        elif added and in_buildup:
+            self._accel_score = max(0.0, self._accel_score - 0.04)
+        elif now_roll > self._accel_until:
+            self._accel_score = max(0.0, self._accel_score - 0.08)
+
+        latched = now_roll < self._blink_latch_until and not roll_ended
+        sticky = now_roll < self._blink_sticky_until and not roll_ended
+        accel_latched = (in_buildup or latched or sticky) and self._accel_score >= 0.35 and (
+            now_roll < self._accel_until or self._accel_score >= 0.50 or latched or sticky
+        )
+        want_roll_blink = (
+            (not roll_ended)
+            and accel_latched
+            and self._roll_hz >= 5.5
+            and (enter_blink or latched or sticky)
+            and (enter_blink or snare_roll_live or last_onset_age < 0.48)
+        )
+        if want_roll_blink:
+            self._roll_active = min(1.0, self._roll_active + 0.50)
+            if added or last_onset_age < 0.30:
+                self._blink_sticky_until = max(self._blink_sticky_until, now_roll + 0.80)
+        else:
+            decay = 0.18 if roll_ended else (0.05 if (latched or sticky) else 0.12)
+            self._roll_active = max(0.0, self._roll_active - decay)
+
+        if self._roll_active > 0.16 and self._roll_hz >= 5.5 and (latched or sticky or enter_blink) and not roll_ended:
+            # 実測ギャップ優先（テンポ同期）。粘着時の強制 6.5Hz 床は外す
+            gap_hz_live = 0.0
+            if n_on >= 3:
+                g_live = np.diff(np.asarray(self._roll_onset_times[-8:], dtype=np.float64))
+                g_live = g_live[(g_live >= 0.040) & (g_live <= 0.22)]
+                if g_live.size >= 1:
+                    gap_hz_live = float(1.0 / max(1e-3, float(np.median(g_live))))
+            if gap_hz_live >= 4.5:
+                self._roll_hz = float(np.clip(0.35 * self._roll_hz + 0.65 * gap_hz_live, 4.5, 20.0))
+            hz_use = float(np.clip(self._roll_hz if self._roll_hz >= 4.5 else 8.0, 4.5, 20.0))
+            # スネア onset に位相ロック（点滅＝ヒットタイミング）
+            if added:
+                self._roll_phase = 0.0
+            else:
+                self._roll_phase = min(0.999, self._roll_phase + dt_roll * hz_use)
+        else:
+            self._roll_phase *= 0.88
+
         # Soft / atmospheric genres: no strobe — only punchy styles get flash
         soft_genre = self._genre in {
             "warm_acoustic",
@@ -996,7 +1437,7 @@ class MoodRhythmMapper:
             "bright_pop",
             "silent",
         }
-        # 溜め中はフラッシュ禁止、解放時は強制許可
+        # 溜め中はフラッシュ禁止、解放時は強制許可（加速ロール点滅は例外）
         in_hold = self._tension_phase == "hold" and self._tension > 0.25
         in_release = self._release > 0.35
         section_flash = self._section in {"chorus", "drop"} and self._song_bright < 0.55
@@ -1010,16 +1451,27 @@ class MoodRhythmMapper:
                 or self._section == "drop"
             )
         )
-        if in_hold:
+        roll_blink = (
+            (not roll_ended)
+            and (enter_blink or latched or sticky)
+            and self._roll_active > 0.18
+            and self._accel_score >= 0.35
+            and self._roll_hz >= 5.5
+            and (enter_blink or snare_roll_live or last_onset_age < 0.50)
+        )
+        if roll_blink:
+            allow_flash = True
+            in_hold = False  # 加速ビート中は消灯ホールドより点滅を優先
+        if in_hold and not roll_blink:
             beat = False
             allow_flash = False
-        elif soft_genre and self._impact < 0.62 and self._section not in {"chorus", "drop"} and not in_release:
+        elif soft_genre and self._impact < 0.62 and self._section not in {"chorus", "drop"} and not in_release and not roll_blink:
             beat = False
             allow_flash = False
         elif self._style == "atmosphere" and self._impact < 0.50 and self._section not in {
             "chorus",
             "drop",
-        } and not in_release:
+        } and not in_release and not roll_blink:
             if onset_strength < 0.70:
                 beat = False
             allow_flash = False
@@ -1126,7 +1578,9 @@ class MoodRhythmMapper:
             target_hue, target_sat, target_val
         )
         # Tension / release override effect label
-        if in_release and self._release > 0.4:
+        if roll_blink:
+            effect = "accel_blink"
+        elif in_release and self._release > 0.4:
             effect = "drop_hit"
         elif in_hold and self._tension > 0.35:
             effect = "tension_hold"
@@ -1192,6 +1646,19 @@ class MoodRhythmMapper:
         # Snap brightness on release; lag more during hold
         env_use = 0.55 if in_release else (0.12 if in_hold else env)
         self._bright = (1 - env_use) * self._bright + env_use * env_bright
+
+        # 加速ビートに合わせたハード点滅（スネア onset 位相ロック）
+        if roll_blink:
+            # ヒット直後をオン。周期の約28〜38%（速いほど短く）
+            hz_blink = float(np.clip(self._roll_hz if self._roll_hz >= 4.5 else 8.0, 4.5, 20.0))
+            duty = float(np.clip(0.34 * (8.5 / hz_blink), 0.22, 0.40))
+            # 位相が 1 に張り付いた欠落中はオフ（次の onset 待ち）
+            on = self._roll_phase < duty
+            self._bright = 1.0 if on else 0.04
+            self._val = min(1.0, max(self._val, 0.85 if on else 0.25))
+            beat = bool(on)
+            if on:
+                self._flash = max(self._flash, 0.65)
 
         r, g, b = colorsys.hsv_to_rgb(self._hue, self._sat, self._val)
         r, g, b = self._discourage_green(int(r * 255), int(g * 255), int(b * 255))

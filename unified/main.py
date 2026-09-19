@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tkinter as tk
 from pathlib import Path
@@ -13,10 +14,11 @@ BLE_APP = ROOT / "BluetoothLED" / "app"
 UNIFIED_DIR = Path(__file__).resolve().parent
 
 # DMX を先に載せ、audio_reactive = ClubAudioAnalyzer ブリッジを確定させる
-for p in (str(UNIFIED_DIR), str(DMX_DIR)):
+for p in (str(UNIFIED_DIR), str(DMX_DIR), str(ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+from app_settings import load_settings, update_settings  # noqa: E402
 from audio_reactive import ClubAudioAnalyzer  # noqa: E402
 from laser_dmx_app import LaserDMXApp  # noqa: E402
 from ble_panel import BleLedPanel  # noqa: E402
@@ -52,11 +54,19 @@ class LightSystemApp(tk.Tk):
         self._ai_device_label = tk.StringVar(value="")
         self._ai_status = tk.StringVar(value="共有 AI: 停止中")
         self._device_rows: list[tuple[int | None, str]] = []
+        try:
+            boot = load_settings()
+            self._ble_auto_connect = tk.BooleanVar(value=bool(boot.get("ble_auto_connect", False)))
+            self._dmx_auto_connect = tk.BooleanVar(value=bool(boot.get("dmx_auto_connect", False)))
+        except Exception:
+            self._ble_auto_connect = tk.BooleanVar(value=False)
+            self._dmx_auto_connect = tk.BooleanVar(value=False)
 
         self._build_chrome()
         self._refresh_devices()
         # 子パネル生成後に Combobox スタイルを再適用（埋め込み側の theme 操作対策）
         self._apply_combobox_style()
+        self.after(500, self._maybe_auto_connect)
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -133,8 +143,35 @@ class LightSystemApp(tk.Tk):
         )
         self._apply_combobox_style()
 
-        ai = ttk.LabelFrame(self, text="共有 AI リアクティブ（BluetoothLED 音楽解析 → LED + レーザー）", padding=10)
-        ai.pack(fill="x", padx=12, pady=(12, 6))
+        # 上部はコンパクトなステータスのみ（詳細は「共通」タブ）
+        status_bar = ttk.Frame(self)
+        status_bar.pack(fill="x", padx=12, pady=(10, 4))
+        self._ai_btn = ttk.Button(status_bar, text="AI開始", command=self._toggle_ai, width=8)
+        self._ai_btn.pack(side="left")
+        ttk.Label(status_bar, textvariable=self._ai_status).pack(side="left", padx=(10, 0))
+
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self._main_nb = nb
+
+        common_tab = ttk.Frame(nb)
+        ble_tab = ttk.Frame(nb)
+        dmx_tab = ttk.Frame(nb)
+        nb.add(common_tab, text="共通")
+        nb.add(ble_tab, text="Bluetooth LED")
+        nb.add(dmx_tab, text="DMX レーザー")
+
+        # --- 共通タブ：AI／接続 ＋ タイムライン（LED/Laser非依存） ---
+        common_nb = ttk.Notebook(common_tab)
+        common_nb.pack(fill="both", expand=True, padx=4, pady=4)
+
+        common_ai = ttk.Frame(common_nb)
+        common_shared = ttk.Frame(common_nb)
+        common_nb.add(common_ai, text="AI・接続")
+        common_nb.add(common_shared, text="タイムライン")
+
+        ai = ttk.LabelFrame(common_ai, text="共有 AI リアクティブ（LED + レーザー）", padding=10)
+        ai.pack(fill="x", padx=8, pady=8)
 
         row1 = ttk.Frame(ai)
         row1.pack(fill="x")
@@ -156,8 +193,6 @@ class LightSystemApp(tk.Tk):
 
         row2 = ttk.Frame(ai)
         row2.pack(fill="x", pady=(8, 0))
-        self._ai_btn = ttk.Button(row2, text="開始", command=self._toggle_ai, width=8)
-        self._ai_btn.pack(side="left")
         self._mode_combo = ttk.Combobox(
             row2,
             textvariable=self._ai_mode,
@@ -166,7 +201,7 @@ class LightSystemApp(tk.Tk):
             width=12,
             height=8,
         )
-        self._mode_combo.pack(side="left", padx=(10, 0))
+        self._mode_combo.pack(side="left")
         self._mode_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_ai_mode())
         ttk.Label(row2, text="感度").pack(side="left", padx=(14, 4))
         ttk.Scale(
@@ -180,24 +215,85 @@ class LightSystemApp(tk.Tk):
         ).pack(side="left", fill="x", expand=True)
         self._sens_lbl = ttk.Label(row2, text="1.4", width=4)
         self._sens_lbl.pack(side="left", padx=4)
-        ttk.Label(row2, textvariable=self._ai_status).pack(side="right")
 
-        nb = ttk.Notebook(self)
-        nb.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
-        ble_tab = ttk.Frame(nb)
-        dmx_tab = ttk.Frame(nb)
-        nb.add(ble_tab, text="Bluetooth LED")
-        nb.add(dmx_tab, text="DMX レーザー")
+        boot = ttk.LabelFrame(common_ai, text="起動時の自動接続", padding=8)
+        boot.pack(fill="x", padx=8, pady=(0, 8))
+        boot_row = ttk.Frame(boot)
+        boot_row.pack(fill="x")
+        ttk.Checkbutton(
+            boot_row,
+            text="Bluetooth LED を自動接続",
+            variable=self._ble_auto_connect,
+            command=self._on_boot_auto_connect_changed,
+        ).pack(side="left", padx=(0, 16))
+        ttk.Checkbutton(
+            boot_row,
+            text="DMX（COM）を自動接続",
+            variable=self._dmx_auto_connect,
+            command=self._on_boot_auto_connect_changed,
+        ).pack(side="left")
+        ttk.Label(
+            boot,
+            text="前回の BLE アドレス / COM を記憶し、次回起動時に再接続します。",
+            foreground="#9aa0a6",
+        ).pack(anchor="w", pady=(4, 0))
 
         self.ble = BleLedPanel(ble_tab, hide_local_ai=True)
         self.ble.pack(fill="both", expand=True)
 
-        self.dmx = LaserDMXApp(dmx_tab, hide_audio_section=True)
+        self.dmx = LaserDMXApp(
+            dmx_tab, hide_audio_section=True, shared_host=common_shared
+        )
         self.dmx.pack(fill="both", expand=True)
+        try:
+            self.dmx.set_tile_led_override_handler(self.ble.set_tile_override)
+        except Exception:
+            pass
+        # パネル側チェックと上部設定を同期
+        try:
+            self.ble.set_auto_connect(bool(self._ble_auto_connect.get()))
+            self.dmx.set_auto_connect(bool(self._dmx_auto_connect.get()))
+        except Exception:
+            pass
+
+    def _on_boot_auto_connect_changed(self) -> None:
+        ble_on = bool(self._ble_auto_connect.get())
+        dmx_on = bool(self._dmx_auto_connect.get())
+        try:
+            update_settings(ble_auto_connect=ble_on, dmx_auto_connect=dmx_on)
+        except Exception:
+            pass
+        try:
+            self.ble.set_auto_connect(ble_on)
+            self.ble._persist_ble_settings(include_address=True)
+        except Exception:
+            pass
+        try:
+            self.dmx.set_auto_connect(dmx_on)
+            self.dmx._on_dmx_auto_connect_toggled()
+        except Exception:
+            pass
+
+    def _maybe_auto_connect(self) -> None:
+        """起動直後に、設定されていれば BLE / DMX へ自動接続する。"""
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = {}
+        if bool(settings.get("dmx_auto_connect", False)) or bool(self._dmx_auto_connect.get()):
+            try:
+                ok = self.dmx.try_auto_connect(silent=True)
+                if ok:
+                    self._ai_status.set("共有 AI: 停止中（DMX 自動接続済み）")
+            except Exception:
+                pass
+        if bool(settings.get("ble_auto_connect", False)) or bool(self._ble_auto_connect.get()):
+            try:
+                self.ble.try_auto_connect()
+            except Exception:
+                pass
 
     def _refresh_devices(self) -> None:
-        prev = self._ai_device_label.get()
         rows: list[tuple[int | None, str]] = []
         try:
             for idx, label in ClubAudioAnalyzer.list_input_devices():
@@ -207,12 +303,67 @@ class LightSystemApp(tk.Tk):
             rows = [(None, f"default: システム既定（取得失敗: {exc}）")]
         self._device_rows = rows
         labels = [r[1] for r in rows]
-        if prev in labels:
-            self._ai_device_label.set(prev)
+        chosen = self._pick_saved_device_label(labels)
+        if chosen:
+            self._ai_device_label.set(chosen)
         elif labels:
             self._ai_device_label.set(labels[0])
         else:
             self._ai_device_label.set("")
+
+    def _device_name_key(self, label: str) -> str:
+        """'12: Device Name' / 'default: …' から比較用の名前部分を取る。"""
+        s = (label or "").strip()
+        if ": " in s:
+            return s.split(": ", 1)[1].strip().lower()
+        return s.lower()
+
+    def _pick_saved_device_label(self, labels: list[str]) -> str | None:
+        if not labels:
+            return None
+        try:
+            settings = load_settings()
+        except Exception:
+            settings = {}
+        saved_label = str(settings.get("audio_input_label", "") or "").strip()
+        try:
+            saved_id = int(settings.get("audio_input_id", -1))
+        except (TypeError, ValueError):
+            saved_id = -1
+        # 1) ラベル完全一致
+        if saved_label and saved_label in labels:
+            return saved_label
+        # 2) デバイス ID 一致
+        if saved_id >= 0:
+            for idx, lab in self._device_rows:
+                if idx == saved_id:
+                    return lab
+        # 3) 名前部分の部分一致（インデックスが変わっても復元）
+        if saved_label:
+            key = self._device_name_key(saved_label)
+            if key:
+                for lab in labels:
+                    if self._device_name_key(lab) == key:
+                        return lab
+                for lab in labels:
+                    if key in self._device_name_key(lab) or self._device_name_key(lab) in key:
+                        return lab
+        # 4) 今の UI 選択がまだ有効なら維持
+        cur = self._ai_device_label.get()
+        if cur in labels:
+            return cur
+        return None
+
+    def _persist_audio_input(self) -> None:
+        label = self._ai_device_label.get().strip()
+        dev_id = self._selected_device_id()
+        try:
+            update_settings(
+                audio_input_label=label,
+                audio_input_id=(-1 if dev_id is None else int(dev_id)),
+            )
+        except Exception:
+            pass
 
     def _close_device_picker(self) -> None:
         win = self._device_picker
@@ -286,6 +437,7 @@ class LightSystemApp(tk.Tk):
             if not sel:
                 return
             self._ai_device_label.set(labels[int(sel[0])])
+            self._persist_audio_input()
             self._close_device_picker()
 
         lb.bind("<ButtonRelease-1>", choose)
@@ -333,6 +485,7 @@ class LightSystemApp(tk.Tk):
         if self._analyzer is not None:
             return
         self._close_device_picker()
+        self._persist_audio_input()
         device = self._selected_device_id()
 
         def on_frame(frame: LightingFrame) -> None:
@@ -358,7 +511,7 @@ class LightSystemApp(tk.Tk):
         self._ai_active = True
         self.ble.set_ai_active(True)
         self.dmx.attach_shared_audio(analyzer)
-        self._ai_btn.configure(text="停止")
+        self._ai_btn.configure(text="AI停止")
         self._device_pick_btn.configure(state="disabled")
         self._ai_status.set("共有 AI: 動作中 — LED + レーザー連動")
 
@@ -381,27 +534,42 @@ class LightSystemApp(tk.Tk):
             except Exception:
                 pass
             self._analyzer = None
-        self._ai_btn.configure(text="開始")
+        self._ai_btn.configure(text="AI開始")
         self._device_pick_btn.configure(state="normal")
         self._ai_status.set("共有 AI: 停止中")
 
     def _on_close(self) -> None:
-        self._close_device_picker()
-        self._stop_ai()
+        """バツボタンでクリーン終了（BLE/PortAudio 解体時のクラッシュ風ハングを防ぐ）。"""
+        for step in (
+            self._close_device_picker,
+            self._persist_audio_input,
+            self._stop_ai,
+            self.ble.shutdown,
+            self.dmx.cleanup,
+        ):
+            try:
+                step()
+            except Exception:
+                pass
         try:
-            self.ble.shutdown()
+            self.quit()
         except Exception:
             pass
         try:
-            self.dmx.cleanup()
+            self.destroy()
         except Exception:
             pass
-        self.destroy()
+        # バックグラウンドスレッド／ネイティブコールバックの終了待ちで
+        # インタプリタ解体が例外になるのを避け、正常終了にする
+        os._exit(0)
 
 
 def main() -> None:
     app = LightSystemApp()
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        os._exit(0)
 
 
 if __name__ == "__main__":

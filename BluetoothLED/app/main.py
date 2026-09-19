@@ -582,6 +582,8 @@ class App(tk.Tk):
             bright_pct = min(100.0, max(bright_pct, 70.0 + frame.release * 30.0))
         elif frame.tension > 0.4 and frame.effect == "tension_hold":
             bright_pct = min(bright_pct, 35.0 + (1.0 - frame.tension) * 20.0)
+        if frame.effect == "accel_blink":
+            bright_pct = 100.0 if frame.brightness >= 0.35 or frame.beat else 3.0
         self._brightness.set(bright_pct)
         self.bright_label.configure(text=f"{int(bright_pct)}%")
         # Skip rebuilding palette marker every tick — preview only (snappier)
