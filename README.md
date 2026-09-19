@@ -1,6 +1,6 @@
-# Light System 統合アプリ
+# Light System 統合アプリ（Web UI）
 
-Bluetooth LED と DMX レーザを一つの GUI で操作します。音楽解析は **BluetoothLED** 側のエンジンを共有します。
+Bluetooth LED と DMX レーザを **ブラウザ** から操作します。ハードウェア制御は Python サーバ側で行います。
 
 ## 起動
 
@@ -11,19 +11,26 @@ run.bat
 または:
 
 ```bat
-python unified\main.py
+run_web.bat
 ```
+
+```bat
+python -m server
+```
+
+ブラウザで [http://127.0.0.1:8787/](http://127.0.0.1:8787/) が開きます。
 
 ## 使い方
 
-1. 上部の「共有 AI リアクティブ」でマイク入力・感度・モードを設定して開始
-2. **Bluetooth LED** タブで BLE 接続（スキャン or アドレス）
-3. **DMX レーザー** タブで COM ポート接続・モーション操作
-4. 上部の「起動時の自動接続」で、次回起動時の Bluetooth / DMX 自動接続をオンにできる（前回のアドレス・COM を記憶）
+1. **タイムライン**タブで音楽を開き、Space で再生／停止
+2. ポン出しタイルを押している間だけ LED／レーザーを発火（記録 ON でキュー化）
+3. **プロジェクト保存**で曲＋キューをセット保存
+4. **DMX** タブで COM 接続・モーション
+5. **BLE LED** タブでスキャン／接続／色送信
+6. **AI・接続** で共有マイク解析を開始（サーバ PC のマイク）
 
-AI 開始中は同じ解析結果で LED の色／明るさとレーザーのモーション・CH9・速度が連動します。
+## 補足
 
-## 個別起動（従来どおり）
-
-- `BluetoothLED\run.bat`
-- `DMX\start_laser_dmx.bat`（単体でも BluetoothLED 解析を使用）
+- BLE／マイク／COM は **サーバを動かしている PC** 上のデバイスを使います
+- 旧 Tk 統合 GUI は `python unified\main.py` で起動できます（非推奨）
+- 個別起動（従来）: `BluetoothLED\run.bat` / `DMX\start_laser_dmx.bat`

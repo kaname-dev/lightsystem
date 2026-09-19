@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Light System</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">Light System</div>
+    <div class="status-block">
+      <div class="status" id="connStatus">接続中…</div>
+      <div class="status err" id="lastError" hidden></div>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button type="button" data-tab="timeline" class="active">タイムライン</button>
+    <button type="button" data-tab="tiles">ポン出し設定</button>
+    <button type="button" data-tab="ai">AI・接続</button>
+    <button type="button" data-tab="dmx">DMX</button>
+    <button type="button" data-tab="ble">BLE LED</button>
+  </nav>
+
+  <main>
+    <!-- Timeline -->
+    <section id="tab-timeline" class="panel active">
+      <p class="hint">Space=再生/停止 ／ ホイール=拡大 ／ Shift+ドラッグ=パン ／ Delete=選択削除</p>
+      <div class="row wrap">
+        <label class="file-btn">
+          音楽を開く
+          <input type="file" id="audioFile" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" hidden />
+        </label>
+        <button type="button" id="btnPlay">▶ 再生</button>
+        <button type="button" id="btnStop">⏹</button>
+        <span id="timeLabel">0.00 / 0.00 s</span>
+        <button type="button" id="zoomOut">−</button>
+        <span id="zoomLabel">100%</span>
+        <button type="button" id="zoomIn">＋</button>
+        <button type="button" id="zoomFit">全体</button>
+        <label class="vol">音量 <input type="range" id="volume" min="0" max="100" value="80" /></label>
+        <button type="button" id="btnSaveProj">プロジェクト保存</button>
+        <button type="button" id="btnLoadProj">プロジェクト開く</button>
+      </div>
+      <canvas id="tlCanvas" height="160"></canvas>
+      <div class="row wrap">
+        <label><input type="checkbox" id="chkRecord" /> ポン出しを記録</label>
+        <label><input type="checkbox" id="chkAutoplay" checked /> 再生時に自動ポン出し</label>
+        <span id="cueStatus">キュー: 0</span>
+        <button type="button" id="btnDelCue">選択削除</button>
+        <button type="button" id="btnClearCues">全消去</button>
+      </div>
+      <div class="split">
+        <div>
+          <h3>ポン出しタイル</h3>
+          <div id="tileGrid" class="tile-grid"></div>
+        </div>
+        <div>
+          <h3>キュー一覧</h3>
+          <select id="cueList" multiple size="12"></select>
+        </div>
+      </div>
+      <select id="projectList" hidden></select>
+    </section>
+
+    <!-- Punch tile editor -->
+    <section id="tab-tiles" class="panel">
+      <h3>ポン出しタイル設定</h3>
+      <p class="hint">「新規タイル」でサイドバーから機器を選び、モーション／エフェクトを設定します。</p>
+      <div class="row wrap">
+        <button type="button" id="btnTileNew" class="primary">新規タイル</button>
+        <button type="button" id="btnTileCapture">現在をキャプチャ</button>
+        <button type="button" id="btnTileLedPack">LED光型パック追加</button>
+        <button type="button" id="btnTileReload">再読込</button>
+        <span id="tileEditStatus" class="badge">—</span>
+      </div>
+      <div class="tiles-main">
+        <div>
+          <h3>一覧</h3>
+          <select id="tileEditList" size="18"></select>
+          <div class="row wrap" style="margin-top:8px">
+            <button type="button" id="btnTileEdit">編集…</button>
+            <button type="button" id="btnTileDelete">削除</button>
+            <button type="button" id="btnTilePreview">プレビュー（押す）</button>
+          </div>
+        </div>
+        <div class="tile-summary" id="tileSummary">
+          <h3>選択中</h3>
+          <p class="hint">一覧から選ぶか「新規タイル」で作成してください。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tile create/edit sidebar -->
+    <div id="tileSidebarBackdrop" class="sidebar-backdrop" hidden></div>
+    <aside id="tileSidebar" class="tile-sidebar" hidden aria-hidden="true">
+      <header class="tile-sidebar-head">
+        <h3 id="tileSidebarTitle">新規タイル</h3>
+        <button type="button" id="btnTileSidebarClose" class="icon-btn" aria-label="閉じる">×</button>
+      </header>
+      <div class="tile-sidebar-body">
+        <label class="sb-field">表示名
+          <input type="text" id="teTitle" placeholder="例: 赤ドット・横走査" />
+        </label>
+        <label class="sb-field">ホットキー
+          <input type="text" id="teHotkey" maxlength="8" placeholder="例: a" />
+        </label>
+
+        <fieldset class="sb-devices">
+          <legend>対象機器</legend>
+          <label class="sb-check"><input type="checkbox" id="teLaser" checked /> DMX レーザー</label>
+          <label class="sb-check"><input type="checkbox" id="teLed" /> Bluetooth LED</label>
+        </fieldset>
+
+        <section id="teLaserPanel" class="sb-device-panel">
+          <h4>レーザー設定</h4>
+          <label class="sb-check"><input type="checkbox" id="teRunMotion" checked /> モーション自動開始</label>
+          <label class="sb-check"><input type="checkbox" id="teDotBase" checked /> 疑似点土台（CH1/2/8）</label>
+          <label class="sb-field">モーション
+            <select id="teMotion"></select>
+          </label>
+          <label class="sb-field">速度
+            <input type="range" id="teSpeed" min="0.25" max="48" step="0.05" value="1.35" />
+            <span id="teSpeedVal">1.35</span>
+          </label>
+          <div class="sb-field">
+            <span>機器対応カラー（CH9）</span>
+            <div id="teCh9Swatches" class="ch9-swatches"></div>
+            <input type="hidden" id="teCh9" value="12" />
+            <span class="hint" id="teCh9Val">CH9 = 12</span>
+          </div>
+          <p class="hint">点モード時の CH9 帯域（pattern 準拠）。チャンネルは現在の DMX 状態を基準にします。</p>
+        </section>
+
+        <section id="teLedPanel" class="sb-device-panel" hidden>
+          <h4>LED 設定</h4>
+          <label class="sb-field">モード／エフェクト
+            <select id="teLedMode"></select>
+          </label>
+          <label class="sb-field">エフェクト速度
+            <input type="range" id="teLedSpeed" min="0" max="100" value="50" />
+            <span id="teLedSpeedVal">50</span>
+          </label>
+          <label class="sb-field">明るさ
+            <input type="range" id="teLedBright" min="1" max="100" value="100" />
+            <span id="teLedBrightVal">100</span>
+          </label>
+          <div class="sb-field">
+            <span>カラーパレット</span>
+            <div class="led-palette-wrap">
+              <canvas id="teLedSv" width="200" height="160"></canvas>
+              <canvas id="teLedHue" width="22" height="160"></canvas>
+            </div>
+            <div class="led-palette-meta">
+              <span class="swatch" id="teLedSwatch"></span>
+              <span id="teLedRgbLabel">RGB 255, 80, 40</span>
+            </div>
+            <input type="hidden" id="teLedR" value="255" />
+            <input type="hidden" id="teLedG" value="80" />
+            <input type="hidden" id="teLedB" value="40" />
+          </div>
+          <div class="row wrap" id="teColorPresets"></div>
+          <p class="hint">固定色のときパレット色が使われます。エフェクト選択時はモード優先です。</p>
+        </section>
+      </div>
+      <footer class="tile-sidebar-foot">
+        <button type="button" id="btnTileSidebarPreview">プレビュー</button>
+        <button type="button" id="btnTileSidebarCancel">キャンセル</button>
+        <button type="button" id="btnTileSidebarSave" class="primary">作成</button>
+      </footer>
+    </aside>
+
+    <!-- AI + auto-connect -->
+    <section id="tab-ai" class="panel">
+      <h3>共有 AI リアクティブ</h3>
+      <p class="hint">サーバ PC のマイク／仮想ケーブル入力を使い、LED（＋接続中ならレーザーモーション）を連動します。</p>
+      <div class="row wrap">
+        <label class="grow">入力デバイス
+          <select id="aiDevice"></select>
+        </label>
+        <button type="button" id="btnAiDevRefresh">更新</button>
+      </div>
+      <div class="row wrap">
+        <label>モード
+          <select id="aiMode"></select>
+        </label>
+        <label>感度 <input type="range" id="aiSens" min="0.3" max="2.5" step="0.1" value="1.4" /></label>
+        <span id="aiSensVal">1.4</span>
+        <button type="button" id="btnAiStart" class="primary">AI 開始</button>
+        <button type="button" id="btnAiStop">AI 停止</button>
+      </div>
+      <p id="aiStatus">停止中</p>
+
+      <h3>起動時の自動接続</h3>
+      <p class="hint">前回の BLE アドレス / COM を記憶し、次回起動時に再接続します。</p>
+      <div class="row wrap">
+        <label><input type="checkbox" id="chkBleAuto" /> Bluetooth LED を自動接続</label>
+        <label><input type="checkbox" id="chkDmxAuto" /> DMX（COM）を自動接続</label>
+      </div>
+      <div class="conn-summary row wrap">
+        <span id="dmxConnBadge" class="badge">DMX: —</span>
+        <span id="bleConnBadge" class="badge">BLE: —</span>
+      </div>
+    </section>
+
+    <!-- DMX -->
+    <section id="tab-dmx" class="panel">
+      <h3>DMX レーザー</h3>
+      <div class="row wrap">
+        <select id="comPorts"></select>
+        <button type="button" id="btnDmxRefresh">再検索</button>
+        <button type="button" id="btnDmxConnect" class="primary">接続</button>
+        <button type="button" id="btnDmxDisconnect">切断</button>
+        <label>開始アドレス <input type="number" id="baseAddr" min="1" max="503" value="1" /></label>
+        <span id="dmxStatus" class="badge">未接続</span>
+      </div>
+      <div class="row wrap">
+        <label><input type="checkbox" id="chkDmxAuto2" /> 起動時にこの COM へ自動接続</label>
+      </div>
+
+      <h3>疑似点・モーション</h3>
+      <div class="row wrap">
+        <label><input type="checkbox" id="chkDotBase" checked /> 疑似点土台（CH1/2/8）</label>
+        <div class="sb-field dmx-ch9-inline">
+          <span>機器対応カラー（CH9）</span>
+          <div id="dmxCh9Swatches" class="ch9-swatches"></div>
+          <input type="hidden" id="clubCh9" value="12" />
+          <span class="hint" id="clubCh9Val">CH9 = 12</span>
+        </div>
+        <select id="motionSelect"></select>
+        <label>速度 <input type="range" id="motionSpeed" min="0.25" max="48" step="0.05" value="1.35" /></label>
+        <button type="button" id="btnMotionStart" class="primary">モーション開始</button>
+        <button type="button" id="btnMotionStop">停止</button>
+        <button type="button" id="btnBlackout">全CH0</button>
+      </div>
+      <div class="row wrap">
+        <label>高さ下端% <input type="range" id="syLo" min="0" max="100" step="0.5" value="0" />
+          <span id="syLoVal">0</span></label>
+        <label>高さ上端% <input type="range" id="syHi" min="0" max="100" step="0.5" value="32" />
+          <span id="syHiVal">32</span></label>
+        <button type="button" id="btnHeightApply">高さ反映</button>
+      </div>
+
+      <div class="split dmx-palette">
+        <div>
+          <h3>点モーション・パレット</h3>
+          <div id="motionPalette" class="palette-list"></div>
+        </div>
+        <div>
+          <h3>クラブ疑似点・位置</h3>
+          <div id="dotPosPalette" class="palette-list"></div>
+        </div>
+      </div>
+
+      <h3>チャンネル</h3>
+      <div id="chSliders" class="ch-grid"></div>
+    </section>
+
+    <!-- BLE -->
+    <section id="tab-ble" class="panel">
+      <h3>Bluetooth LED</h3>
+      <div class="row wrap">
+        <button type="button" id="btnBleScan">スキャン</button>
+        <select id="bleDevices"></select>
+        <button type="button" id="btnBleConnect" class="primary">リストから接続</button>
+        <button type="button" id="btnBleDisconnect">切断</button>
+        <span id="bleStatus" class="badge">未接続</span>
+      </div>
+      <div class="row wrap">
+        <label class="grow">アドレス
+          <input type="text" id="bleAddress" placeholder="C6:70:45:84:1B:D8" spellcheck="false" />
+        </label>
+        <button type="button" id="btnBleAddrConnect">アドレスで接続</button>
+      </div>
+      <div class="row wrap">
+        <label><input type="checkbox" id="chkBleAuto2" /> 起動時にこのアドレスへ自動接続</label>
+        <button type="button" id="btnBleOn">電源 ON</button>
+        <button type="button" id="btnBleOff">電源 OFF</button>
+      </div>
+      <div class="row wrap">
+        <div class="sb-field">
+          <span>カラーパレット</span>
+          <div class="led-palette-wrap">
+            <canvas id="bleLedSv" width="200" height="160"></canvas>
+            <canvas id="bleLedHue" width="22" height="160"></canvas>
+          </div>
+          <div class="led-palette-meta">
+            <span class="swatch" id="ledSwatch"></span>
+            <span id="bleLedRgbLabel">RGB 255, 80, 40</span>
+          </div>
+          <input type="hidden" id="ledR" value="255" />
+          <input type="hidden" id="ledG" value="80" />
+          <input type="hidden" id="ledB" value="40" />
+        </div>
+        <div>
+          <label>明るさ <input type="range" id="ledBright" min="1" max="100" value="100" /></label>
+          <div class="row wrap" id="bleColorPresets" style="margin-top:10px"></div>
+          <button type="button" id="btnLedApply" style="margin-top:10px">色を送る</button>
+        </div>
+      </div>
+      <div class="row wrap">
+        <label>内蔵エフェクト
+          <select id="bleMode"></select>
+        </label>
+        <label>速度 <input type="range" id="bleModeSpeed" min="0" max="100" value="50" /></label>
+        <button type="button" id="btnBleMode">エフェクト送信</button>
+      </div>
+      <p class="hint">エフェクトは変更で即時反映（モード選択時）。</p>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

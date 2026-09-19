@@ -1,0 +1,1 @@
+"""Light System Web backend."""
