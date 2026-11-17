@@ -17,6 +17,11 @@
   let tePalette = null;
   let blePalette = null;
   let esp32Palette = null;
+  let esp32Selected = [];
+  let esp32PaintTimer = null;
+  let esp32SelAnchor = null;
+  let esp32ActiveGroupSpans = null; // グループ選択時は絶対ピクセルで塗る
+  let lastShownOverlapAlertKey = "";
 
   // サーバ未応答時でもボタンを出すためのフォールバック
   const ESP32_PATTERN_FALLBACK = [
@@ -128,7 +133,7 @@
     }
   }
 
-  function createLedPalette(svId, hueId, rId, gId, bId, swatchId, labelId) {
+  function createLedPalette(svId, hueId, rId, gId, bId, swatchId, labelId, onChange) {
     const sv = $(svId);
     const hueEl = $(hueId);
     if (!sv || !hueEl) return null;
@@ -226,6 +231,7 @@
       if (labelId && $(labelId)) $(labelId).textContent = `RGB ${r}, ${g}, ${b}`;
       drawHue();
       drawSv();
+      if (typeof onChange === "function") onChange(r, g, b);
     }
 
     function setRgb(r, g, b) {
@@ -315,6 +321,7 @@
         if (msg.event === "hold" || msg.event === "cues" || msg.event === "timeline") {
           renderTiles();
           renderCues();
+          renderEsp32OverlapWarnings();
           drawTimeline();
           updateTransport();
         }
@@ -326,6 +333,7 @@
         }
         if (msg.event === "esp32" || msg.event === "hello") {
           renderEsp32();
+          renderEsp32OverlapWarnings();
         }
         if (msg.event === "ai" || msg.event === "hello") {
           renderAi();
@@ -381,6 +389,7 @@
     updateTimeLabel();
     renderTiles();
     renderCues();
+    renderEsp32OverlapWarnings();
     renderDmx();
     renderBle();
     renderEsp32();
@@ -450,20 +459,66 @@
     });
   }
 
+  function overlappingCueIds() {
+    const set = new Set();
+    (state?.esp32_overlap_warnings || []).forEach((w) => {
+      if (w.cue_a) set.add(w.cue_a);
+      if (w.cue_b) set.add(w.cue_b);
+    });
+    return set;
+  }
+
+  function renderEsp32OverlapWarnings() {
+    const box = $("esp32OverlapWarn");
+    if (!box) return;
+    const warns = state?.esp32_overlap_warnings || [];
+    const alertItem = state?.esp32_last_overlap_alert;
+    if (alertItem && alertItem.message) {
+      const key = `${alertItem.cue_a || ""}|${alertItem.cue_b || ""}|${alertItem.message}`;
+      if (key !== lastShownOverlapAlertKey) {
+        lastShownOverlapAlertKey = key;
+        try {
+          alert(`⚠ ESP32 重なり警告\n\n${alertItem.message}`);
+        } catch (_) {}
+      }
+    } else if (!alertItem) {
+      lastShownOverlapAlertKey = "";
+    }
+    if (!warns.length) {
+      box.hidden = true;
+      box.innerHTML = "";
+      return;
+    }
+    box.hidden = false;
+    const items = warns
+      .slice(0, 12)
+      .map(
+        (w) =>
+          `<li>${w.message || `「${w.title_a}」と「${w.title_b}」が重なっています（${w.overlap_pixels}px）`}</li>`
+      )
+      .join("");
+    box.innerHTML = `<strong>⚠ ESP32 区間重なり ${warns.length}件</strong><ul>${items}</ul>`;
+  }
+
   function renderCues() {
     const list = $("cueList");
     const cues = state?.cues || [];
-    $("cueStatus").textContent = `キュー: ${cues.length}`;
+    const ov = overlappingCueIds();
+    $("cueStatus").textContent = `キュー: ${cues.length}${
+      ov.size ? ` ／ 重なり警告 ${state?.esp32_overlap_warnings?.length || 0}` : ""
+    }`;
     const prev = new Set([...list.selectedOptions].map((o) => o.value));
     list.innerHTML = "";
     cues.forEach((c) => {
       const opt = document.createElement("option");
       opt.value = c.cue_id;
-      opt.textContent = c.label || `${c.t.toFixed(2)}s ${c.title}`;
+      const mark = ov.has(c.cue_id) ? "⚠ " : "";
+      opt.textContent = `${mark}${c.label || `${c.t.toFixed(2)}s ${c.title}`}`;
       if (prev.has(c.cue_id) || selectedCueIds.has(c.cue_id)) opt.selected = true;
       list.appendChild(opt);
     });
     updateCueHistoryUi();
+    renderEsp32OverlapWarnings();
   }
 
   function updateCueHistoryUi() {
@@ -867,7 +922,220 @@
       esp.patterns && esp.patterns.length ? esp.patterns : ESP32_PATTERN_FALLBACK,
       esp.pattern_running ? esp.pattern_id : ""
     );
+    const segCountEl = $("esp32SegCount");
+    if (segCountEl && document.activeElement !== segCountEl && esp.segment_count != null) {
+      segCountEl.value = String(esp.segment_count);
+    }
+    renderEsp32Segments(esp);
     updateEsp32Swatch();
+  }
+
+  function esp32SegmentRanges(pixelCount, segmentCount) {
+    const nPix = Math.max(1, Number(pixelCount) || 1);
+    const nSeg = Math.max(1, Number(segmentCount) || 1);
+    const base = Math.floor(nPix / nSeg);
+    const rem = nPix % nSeg;
+    const ranges = [];
+    let start = 0;
+    for (let i = 0; i < nSeg; i++) {
+      const len = base + (i < rem ? 1 : 0);
+      ranges.push([start, start + len]);
+      start += len;
+    }
+    return ranges;
+  }
+
+  function syncEsp32SelectionFromState(esp) {
+    if (Array.isArray(esp?.selected)) {
+      esp32Selected = esp.selected.map((n) => Number(n)).filter((n) => Number.isFinite(n));
+    }
+  }
+
+  function pushEsp32Selection() {
+    api("/api/esp32/selection", {
+      method: "POST",
+      body: JSON.stringify({ indices: esp32Selected }),
+    })
+      .then((j) => {
+        if (j.state) mergeState(j.state);
+      })
+      .catch(() => {});
+  }
+
+  function renderEsp32Segments(esp) {
+    const strip = $("esp32SegmentStrip");
+    if (!strip) return;
+    syncEsp32SelectionFromState(esp);
+    const count = Math.max(1, Number(esp?.segment_count) || Number($("esp32SegCount")?.value) || 8);
+    const segs = Array.isArray(esp?.segments) ? esp.segments : [];
+    const pixels = Number(esp?.pixel_count) || Number($("esp32Pixels")?.value) || 720;
+    const ranges = esp32SegmentRanges(pixels, count);
+    const selSet = new Set(esp32Selected);
+    const sig = `${count}|${pixels}|${[...selSet].join(",")}|${segs
+      .map((s) => `${s.on ? 1 : 0}:${s.r},${s.g},${s.b}`)
+      .join(";")}`;
+    if (strip.dataset.sig !== sig) {
+      strip.innerHTML = "";
+      strip.style.gridTemplateColumns = `repeat(${Math.min(count, 16)}, minmax(44px, 1fr))`;
+      for (let i = 0; i < count; i++) {
+        const seg = segs[i] || { r: 0, g: 0, b: 0, on: false };
+        const [a, b] = ranges[i] || [0, 0];
+        const cell = document.createElement("button");
+        cell.type = "button";
+        const selected = selSet.has(i);
+        cell.className = `esp32-seg-cell${seg.on ? " on" : ""}${selected ? " selected" : ""}`;
+        cell.dataset.index = String(i);
+        const bg = seg.on ? `rgb(${seg.r},${seg.g},${seg.b})` : "#1a2030";
+        cell.style.background = bg;
+        const lum = 0.299 * (seg.r || 0) + 0.587 * (seg.g || 0) + 0.114 * (seg.b || 0);
+        cell.style.color = seg.on && lum > 140 ? "#111" : "#d7dde6";
+        cell.innerHTML = `<span class="seg-idx">#${i + 1}</span><span class="seg-px">${a + 1}-${b}</span>`;
+        cell.title = `区間 ${i + 1}（pixel ${a + 1}–${b}）\nクリック: 選択 / Ctrl: 複数 / Shift: 範囲`;
+        cell.addEventListener("click", (ev) => onEsp32SegmentClick(i, ev, count));
+        strip.appendChild(cell);
+      }
+      strip.dataset.sig = sig;
+    }
+    const info = $("esp32SegInfo");
+    if (info) {
+      const lit = segs.filter((s) => s.on).length;
+      const per = Math.floor(pixels / count);
+      info.textContent = `${count}分割 ≈${per}px / 選択 ${esp32Selected.length} / 点灯 ${lit}`;
+    }
+    renderEsp32Groups(esp);
+  }
+
+  function onEsp32SegmentClick(index, ev, count) {
+    const ctrl = !!ev?.ctrlKey || !!ev?.metaKey;
+    const shift = !!ev?.shiftKey;
+    if (shift && esp32SelAnchor != null) {
+      const a = Math.min(esp32SelAnchor, index);
+      const b = Math.max(esp32SelAnchor, index);
+      const range = [];
+      for (let i = a; i <= b; i++) range.push(i);
+      if (ctrl) {
+        const set = new Set(esp32Selected);
+        range.forEach((i) => set.add(i));
+        esp32Selected = [...set].sort((x, y) => x - y);
+      } else {
+        esp32Selected = range;
+      }
+    } else if (ctrl) {
+      const set = new Set(esp32Selected);
+      if (set.has(index)) set.delete(index);
+      else set.add(index);
+      esp32Selected = [...set].sort((x, y) => x - y);
+      esp32SelAnchor = index;
+    } else {
+      esp32Selected = [index];
+      esp32SelAnchor = index;
+    }
+    esp32ActiveGroupSpans = null;
+    // 即 UI 反映
+    if (state?.esp32) state.esp32.selected = [...esp32Selected];
+    renderEsp32Segments(state?.esp32 || { segment_count: count });
+    pushEsp32Selection();
+    // 選択した瞬間に現在色をライブ適用
+    livePaintEsp32Selection();
+  }
+
+  function livePaintEsp32Selection(optRanges, optSpans) {
+    const r = Number($("esp32R")?.value || 255);
+    const g = Number($("esp32G")?.value || 80);
+    const b = Number($("esp32B")?.value || 40);
+    const brightness = Number($("esp32Bright")?.value || 100) / 100;
+    const segCount = Number(state?.esp32?.segment_count || $("esp32SegCount")?.value || 8);
+    const spans =
+      optSpans && optSpans.length
+        ? optSpans
+        : esp32ActiveGroupSpans && esp32ActiveGroupSpans.length
+          ? esp32ActiveGroupSpans
+          : null;
+    const ranges = spans
+      ? null
+      : optRanges && optRanges.length
+        ? optRanges
+        : esp32Selected.length
+          ? indicesToFracRanges(esp32Selected, segCount)
+          : null;
+    if ((!spans || !spans.length) && (!ranges || !ranges.length)) return;
+    if (esp32PaintTimer) clearTimeout(esp32PaintTimer);
+    esp32PaintTimer = setTimeout(() => {
+      const body = {
+        r,
+        g,
+        b,
+        on: true,
+        brightness,
+        others_off: false,
+      };
+      if (spans && spans.length) {
+        body.spans = spans;
+      } else {
+        body.ranges = ranges;
+        body.indices = esp32Selected;
+        body.segment_count = segCount;
+      }
+      ensureEsp32Ready({ enable: true })
+        .then(() =>
+          api("/api/esp32/paint", {
+            method: "POST",
+            body: JSON.stringify(body),
+          })
+        )
+        .then((j) => {
+          if (j?.state) mergeState(j.state);
+          // 選択はクライアント優先で維持
+          if (state?.esp32) state.esp32.selected = [...esp32Selected];
+          renderEsp32Segments(state?.esp32 || {});
+        })
+        .catch(() => {});
+    }, 40);
+  }
+
+  function renderEsp32Groups(esp) {
+    const box = $("esp32GroupList");
+    if (!box) return;
+    const groups = esp?.groups || [];
+    const sig =
+      `n=${esp?.segment_count || "?"}|px=${esp?.pixel_count || "?"}|` +
+      groups
+        .map(
+          (g) =>
+            `${g.id}:${g.pixel_total || 0}:${JSON.stringify(g.spans || [])}`
+        )
+        .join("|");
+    if (box.dataset.sig === sig) return;
+    box.innerHTML = "";
+    groups.forEach((g) => {
+      const spans = g.spans || [];
+      const overlap = g.overlap_indices || [];
+      const px = g.pixel_total != null ? g.pixel_total : spans.reduce((n, s) => n + (Number(s[1]) - Number(s[0])), 0);
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "preset-btn esp32-group-btn";
+      b.textContent = `${g.name} [${px}px]`;
+      b.title = `ピクセル固定 ${px}px\n${spans
+        .map((s) => `${Number(s[0]) + 1}–${s[1]}`)
+        .join(", ")}\n（分割変換なし）`;
+      b.addEventListener("click", () => {
+        esp32ActiveGroupSpans = spans.map((s) => [Number(s[0]), Number(s[1])]);
+        // 表示用ハイライトのみ（グループ定義の再マップではない）
+        esp32Selected = [...overlap].map(Number).sort((a, c) => a - c);
+        esp32SelAnchor = esp32Selected[0] ?? null;
+        if (state?.esp32) state.esp32.selected = [...esp32Selected];
+        $("esp32GroupName").value = g.name || "";
+        $("esp32GroupName").dataset.gid = g.id;
+        renderEsp32Segments(state?.esp32 || {});
+        pushEsp32Selection();
+        livePaintEsp32Selection(null, esp32ActiveGroupSpans);
+        [...box.querySelectorAll(".esp32-group-btn")].forEach((el) =>
+          el.classList.toggle("active", el === b)
+        );
+      });
+      box.appendChild(b);
+    });
+    box.dataset.sig = sig;
   }
 
   function esp32FormConfig() {
@@ -900,6 +1168,10 @@
   }
 
   function startEsp32Pattern(patternId) {
+    const segCount = Number(state?.esp32?.segment_count || $("esp32SegCount")?.value || 8);
+    const ranges = esp32Selected.length
+      ? indicesToFracRanges(esp32Selected, segCount)
+      : null;
     ensureEsp32Ready({ enable: true })
       .then(() =>
         api("/api/esp32/pattern", {
@@ -911,6 +1183,9 @@
             r: Number($("esp32R").value),
             g: Number($("esp32G").value),
             b: Number($("esp32B").value),
+            ranges,
+            segment_indices: esp32Selected.length ? [...esp32Selected] : null,
+            others_off: true,
           }),
         })
       )
@@ -1030,8 +1305,123 @@
     const ledOn = !!$("teLed")?.checked;
     const espOn = !!$("teEsp32")?.checked;
     if ($("teLaserPanel")) $("teLaserPanel").hidden = !laserOn;
-    // BLE / ESP32 とも色パネルを共有
     if ($("teLedPanel")) $("teLedPanel").hidden = !(ledOn || espOn);
+    if ($("teEsp32Panel")) $("teEsp32Panel").hidden = !espOn;
+    if (espOn) {
+      fillTeEsp32Options();
+      syncTeEsp32TargetUi();
+    }
+  }
+
+  function fillTeEsp32Options() {
+    const gsel = $("teEsp32Group");
+    if (gsel) {
+      const prev = gsel.value;
+      gsel.innerHTML = "";
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = "（グループを選択）";
+      gsel.appendChild(opt0);
+      (state?.esp32?.groups || []).forEach((g) => {
+        const o = document.createElement("option");
+        o.value = g.id;
+        const px = g.pixel_total != null ? g.pixel_total : "?";
+        o.textContent = `${g.name} [${px}px]`;
+        gsel.appendChild(o);
+      });
+      if (prev) gsel.value = prev;
+    }
+    const psel = $("teEsp32Pattern");
+    if (psel) {
+      const list =
+        state?.esp32?.patterns?.length ? state.esp32.patterns : ESP32_PATTERN_FALLBACK;
+      const sig = list.map((p) => p.id).join("|");
+      if (psel.dataset.sig !== sig) {
+        const prev = psel.value;
+        psel.innerHTML = "";
+        list.forEach((p) => {
+          const o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.label || p.id;
+          psel.appendChild(o);
+        });
+        if (prev) psel.value = prev;
+        psel.dataset.sig = sig;
+      }
+    }
+  }
+
+  function syncTeEsp32TargetUi() {
+    const target = $("teEsp32Target")?.value || "all";
+    const fx = $("teEsp32Fx")?.value || "color";
+    if ($("teEsp32Group")) $("teEsp32Group").disabled = target !== "group";
+    if ($("btnTeEsp32UseSelection")) $("btnTeEsp32UseSelection").disabled = target !== "segments";
+    if ($("teEsp32Pattern")) $("teEsp32Pattern").disabled = fx !== "pattern";
+    if ($("teEsp32PatSpeed")) $("teEsp32PatSpeed").disabled = fx !== "pattern";
+    renderTeEsp32SegChips();
+  }
+
+  function parseTeEsp32Segments() {
+    const raw = ($("teEsp32Segments")?.value || "").trim();
+    if (!raw) return [];
+    return raw
+      .split(",")
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n >= 0);
+  }
+
+  function parseTeEsp32Ranges() {
+    const raw = ($("teEsp32Ranges")?.value || "").trim();
+    if (!raw) return [];
+    try {
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((rr) => Array.isArray(rr) && rr.length >= 2)
+        .map((rr) => [Number(rr[0]), Number(rr[1])])
+        .filter((rr) => Number.isFinite(rr[0]) && Number.isFinite(rr[1]));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function indicesToFracRanges(indices, segmentCount) {
+    const n = Math.max(1, Number(segmentCount) || 1);
+    const clean = [...new Set(indices.map(Number).filter((i) => Number.isFinite(i)))]
+      .map((i) => Math.max(0, Math.min(n - 1, i)))
+      .sort((a, b) => a - b);
+    if (!clean.length) return [];
+    const ranges = [];
+    let start = clean[0];
+    let prev = clean[0];
+    for (let k = 1; k < clean.length; k++) {
+      const i = clean[k];
+      if (i === prev + 1) {
+        prev = i;
+        continue;
+      }
+      ranges.push([start / n, (prev + 1) / n]);
+      start = prev = i;
+    }
+    ranges.push([start / n, (prev + 1) / n]);
+    return ranges;
+  }
+
+  function renderTeEsp32SegChips() {
+    const box = $("teEsp32SegChips");
+    if (!box) return;
+    const idxs = parseTeEsp32Segments();
+    box.innerHTML = "";
+    if (!idxs.length) {
+      box.innerHTML = `<span class="hint">未設定（「現在の選択を取り込み」）</span>`;
+      return;
+    }
+    idxs.forEach((i) => {
+      const span = document.createElement("span");
+      span.className = "esp32-chip";
+      span.textContent = `#${i + 1}`;
+      box.appendChild(span);
+    });
   }
 
   function defaultNewTileForm() {
@@ -1063,6 +1453,18 @@
     $("teLedMode").value = "";
     $("teLedSpeed").value = "50";
     $("teLedSpeedVal").textContent = "50";
+    if ($("teEsp32Target")) $("teEsp32Target").value = "all";
+    if ($("teEsp32Group")) $("teEsp32Group").value = "";
+    if ($("teEsp32Fx")) $("teEsp32Fx").value = "color";
+    if ($("teEsp32Pattern")) $("teEsp32Pattern").value = ESP32_PATTERN_FALLBACK[0]?.id || "";
+    if ($("teEsp32PatSpeed")) {
+      $("teEsp32PatSpeed").value = "100";
+      if ($("teEsp32PatSpeedVal")) $("teEsp32PatSpeedVal").textContent = "1.00×";
+    }
+    if ($("teEsp32OthersOff")) $("teEsp32OthersOff").checked = true;
+    if ($("teEsp32Segments")) $("teEsp32Segments").value = "";
+    if ($("teEsp32SegCount")) $("teEsp32SegCount").value = "";
+    if ($("teEsp32Ranges")) $("teEsp32Ranges").value = "[]";
     syncDevicePanels();
   }
 
@@ -1102,6 +1504,26 @@
     $("teLedMode").value = t.led_mode == null ? "" : String(t.led_mode);
     $("teLedSpeed").value = String(t.led_speed ?? 50);
     $("teLedSpeedVal").textContent = String(t.led_speed ?? 50);
+    if ($("teEsp32Target")) $("teEsp32Target").value = t.esp32_target || "all";
+    if ($("teEsp32Group")) $("teEsp32Group").value = t.esp32_group_id || "";
+    if ($("teEsp32Fx")) $("teEsp32Fx").value = t.esp32_fx || "color";
+    if ($("teEsp32Pattern")) $("teEsp32Pattern").value = t.esp32_pattern_id || "";
+    if ($("teEsp32PatSpeed")) {
+      const sp = Math.round((t.esp32_pattern_speed || 1) * 100);
+      $("teEsp32PatSpeed").value = String(sp);
+      if ($("teEsp32PatSpeedVal")) $("teEsp32PatSpeedVal").textContent = `${(sp / 100).toFixed(2)}×`;
+    }
+    if ($("teEsp32OthersOff")) $("teEsp32OthersOff").checked = t.esp32_others_off !== false;
+    if ($("teEsp32Segments")) {
+      $("teEsp32Segments").value = (t.esp32_segments || []).join(",");
+    }
+    if ($("teEsp32SegCount")) {
+      $("teEsp32SegCount").value =
+        t.esp32_segment_count != null ? String(t.esp32_segment_count) : "";
+    }
+    if ($("teEsp32Ranges")) {
+      $("teEsp32Ranges").value = JSON.stringify(t.esp32_ranges || []);
+    }
     $("tileEditStatus").textContent = `#${editTileIndex + 1} / ${tiles.length}`;
     const list = $("tileEditList");
     if (list) list.selectedIndex = editTileIndex;
@@ -1134,6 +1556,18 @@
       led_brightness: Number($("teLedBright").value),
       led_mode: modeVal === "" ? null : Number(modeVal),
       led_speed: Number($("teLedSpeed").value),
+      esp32_target: $("teEsp32Target")?.value || "all",
+      esp32_segments: parseTeEsp32Segments(),
+      esp32_segment_count: (() => {
+        const v = Number($("teEsp32SegCount")?.value);
+        return Number.isFinite(v) && v > 0 ? v : null;
+      })(),
+      esp32_ranges: parseTeEsp32Ranges(),
+      esp32_group_id: $("teEsp32Group")?.value || null,
+      esp32_fx: $("teEsp32Fx")?.value || "color",
+      esp32_pattern_id: $("teEsp32Pattern")?.value || null,
+      esp32_pattern_speed: Number($("teEsp32PatSpeed")?.value || 100) / 100,
+      esp32_others_off: !!$("teEsp32OthersOff")?.checked,
     };
   }
 
@@ -1159,6 +1593,21 @@
         ledInfo = m ? m.label : `mode ${t.led_mode}`;
       }
     }
+    let espInfo = "—";
+    if (t.apply_esp32) {
+      const tgt =
+        t.esp32_target === "group"
+          ? `グループ:${t.esp32_group_id || "?"}`
+          : t.esp32_target === "segments"
+            ? `区間[${(t.esp32_segments || []).map((i) => Number(i) + 1).join(",")}]` +
+              (t.esp32_segment_count ? `(保存${t.esp32_segment_count}分割)` : "")
+            : "全体";
+      const fx =
+        t.esp32_fx === "pattern"
+          ? `パターン:${t.esp32_pattern_id || "?"}`
+          : `単色 RGB(${t.led_r},${t.led_g},${t.led_b})`;
+      espInfo = `${tgt} / ${fx}`;
+    }
     box.innerHTML = `
       <h3>${t.title || "タイル"}</h3>
       <dl>
@@ -1166,6 +1615,7 @@
         <dt>ホットキー</dt><dd>${t.hotkey || "—"}</dd>
         <dt>モーション</dt><dd>${t.apply_laser !== false ? motionName : "—"}</dd>
         <dt>LED</dt><dd>${ledInfo}</dd>
+        <dt>ESP32</dt><dd>${espInfo}</dd>
       </dl>
       <p class="hint">「編集…」または一覧をダブルクリックでサイドバーを開きます。</p>`;
   }
@@ -1316,6 +1766,7 @@
         }
       }
       // clips
+      const ovIds = overlappingCueIds();
       (state?.cues || []).forEach((c, idx) => {
         let x0 = timeToX(c.t, w);
         let x1 = timeToX(c.t + Math.max(0.04, c.hold_sec || 0.05), w);
@@ -1325,17 +1776,23 @@
         const y0 = rh + wh + 6 + lane * ((ch - 8) / 3);
         const y1 = y0 + (ch - 8) / 3 - 4;
         const selected = selectedCueIds.has(c.cue_id);
+        const warn = ovIds.has(c.cue_id);
         ctx.fillStyle = c.tile?.led_r != null
           ? `rgb(${c.tile.led_r},${c.tile.led_g},${c.tile.led_b})`
           : "#3d6ebd";
         ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
-        ctx.strokeStyle = selected ? "#fff" : "#0d1117";
-        ctx.lineWidth = selected ? 2 : 1;
+        if (warn) {
+          ctx.fillStyle = "rgba(255, 180, 40, 0.35)";
+          ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+        }
+        ctx.strokeStyle = selected ? "#fff" : warn ? "#ffb400" : "#0d1117";
+        ctx.lineWidth = selected || warn ? 2 : 1;
         ctx.strokeRect(x0, y0, x1 - x0, y1 - y0);
         if (x1 - x0 >= 28) {
           ctx.fillStyle = "#fff";
           ctx.font = "bold 11px Segoe UI";
-          ctx.fillText(String(c.title || "").slice(0, 16), x0 + 6, (y0 + y1) / 2 + 4);
+          const label = `${warn ? "⚠ " : ""}${String(c.title || "").slice(0, 14)}`;
+          ctx.fillText(label, x0 + 6, (y0 + y1) / 2 + 4);
         }
       });
       // playhead
@@ -1815,12 +2272,15 @@
   $("chkEsp32Auto")?.addEventListener("change", () =>
     ensureEsp32Ready({ enable: false }).catch(alert)
   );
-  $("esp32Bright")?.addEventListener("input", updateEsp32Swatch);
   $("esp32PatSpeed")?.addEventListener("input", (e) => {
     const v = Number(e.target.value) / 100;
     if ($("esp32PatSpeedVal")) $("esp32PatSpeedVal").textContent = `${v.toFixed(2)}×`;
   });
-  $("btnEsp32Apply")?.addEventListener("click", () =>
+  $("btnEsp32Apply")?.addEventListener("click", () => {
+    if (esp32Selected.length) {
+      livePaintEsp32Selection();
+      return;
+    }
     ensureEsp32Ready({ enable: true })
       .then(() =>
         api("/api/esp32/color", {
@@ -1834,8 +2294,8 @@
         })
       )
       .then(applyEsp32State)
-      .catch(alert)
-  );
+      .catch(alert);
+  });
   $("btnEsp32PatStop")?.addEventListener("click", () =>
     api("/api/esp32/pattern/stop", { method: "POST" }).then(applyEsp32State).catch(alert)
   );
@@ -1845,6 +2305,131 @@
       .then(applyEsp32State)
       .catch(alert)
   );
+  $("btnEsp32SegApply")?.addEventListener("click", () => {
+    const count = Math.max(1, Math.min(64, Number($("esp32SegCount")?.value) || 8));
+    ensureEsp32Ready({ enable: true })
+      .then(() =>
+        api("/api/esp32/segments/count", {
+          method: "POST",
+          body: JSON.stringify({ count }),
+        })
+      )
+      .then((j) => {
+        esp32Selected = [];
+        esp32SelAnchor = null;
+        esp32ActiveGroupSpans = null;
+        applyEsp32State(j);
+      })
+      .catch(alert);
+  });
+  $("btnEsp32SelAll")?.addEventListener("click", () => {
+    const n = Number(state?.esp32?.segment_count || $("esp32SegCount")?.value || 8);
+    esp32Selected = Array.from({ length: n }, (_, i) => i);
+    esp32SelAnchor = 0;
+    esp32ActiveGroupSpans = null;
+    if (state?.esp32) state.esp32.selected = [...esp32Selected];
+    renderEsp32Segments(state?.esp32 || {});
+    pushEsp32Selection();
+    livePaintEsp32Selection();
+  });
+  $("btnEsp32SelClear")?.addEventListener("click", () => {
+    esp32Selected = [];
+    esp32SelAnchor = null;
+    esp32ActiveGroupSpans = null;
+    if (state?.esp32) state.esp32.selected = [];
+    renderEsp32Segments(state?.esp32 || {});
+    pushEsp32Selection();
+  });
+  $("btnEsp32SegAllOff")?.addEventListener("click", () =>
+    ensureEsp32Ready({ enable: true })
+      .then(() =>
+        api("/api/esp32/segments/fill", {
+          method: "POST",
+          body: JSON.stringify({ r: 0, g: 0, b: 0, on: false }),
+        })
+      )
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("btnEsp32GroupSave")?.addEventListener("click", () => {
+    if (!esp32Selected.length) {
+      alert("先に区間を選択してください");
+      return;
+    }
+    const name = ($("esp32GroupName")?.value || "").trim() || `グループ${(state?.esp32?.groups?.length || 0) + 1}`;
+    const gid = $("esp32GroupName")?.dataset?.gid || null;
+    const segCount = Number(state?.esp32?.segment_count || $("esp32SegCount")?.value || 8);
+    const pixelCount = Number(state?.esp32?.pixel_count || $("esp32Pixels")?.value || 720);
+    api("/api/esp32/groups", {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        indices: esp32Selected,
+        group_id: gid,
+        segment_count: segCount,
+        pixel_count: pixelCount,
+      }),
+    })
+      .then((j) => {
+        if (j.group && $("esp32GroupName")) {
+          $("esp32GroupName").dataset.gid = j.group.id;
+          $("esp32GroupName").value = j.group.name;
+        }
+        if (j.group?.spans) {
+          esp32ActiveGroupSpans = j.group.spans.map((s) => [Number(s[0]), Number(s[1])]);
+        }
+        // グループ一覧を強制再描画
+        const box = $("esp32GroupList");
+        if (box) delete box.dataset.sig;
+        applyEsp32State(j);
+      })
+      .catch(alert);
+  });
+  $("btnEsp32GroupDelete")?.addEventListener("click", () => {
+    const gid = $("esp32GroupName")?.dataset?.gid;
+    if (!gid) {
+      alert("削除するグループを一覧から選んでください");
+      return;
+    }
+    api("/api/esp32/groups/delete", {
+      method: "POST",
+      body: JSON.stringify({ group_id: gid }),
+    })
+      .then((j) => {
+        if ($("esp32GroupName")) {
+          $("esp32GroupName").value = "";
+          delete $("esp32GroupName").dataset.gid;
+        }
+        const box = $("esp32GroupList");
+        if (box) delete box.dataset.sig;
+        applyEsp32State(j);
+      })
+      .catch(alert);
+  });
+  $("esp32Bright")?.addEventListener("input", () => {
+    updateEsp32Swatch();
+    livePaintEsp32Selection();
+  });
+  $("teEsp32Target")?.addEventListener("change", syncTeEsp32TargetUi);
+  $("teEsp32Fx")?.addEventListener("change", syncTeEsp32TargetUi);
+  $("teEsp32PatSpeed")?.addEventListener("input", (e) => {
+    if ($("teEsp32PatSpeedVal")) {
+      $("teEsp32PatSpeedVal").textContent = `${(Number(e.target.value) / 100).toFixed(2)}×`;
+    }
+  });
+  $("btnTeEsp32UseSelection")?.addEventListener("click", () => {
+    if (!esp32Selected.length) {
+      alert("ESP32 タブで区間を選択してから取り込んでください");
+      return;
+    }
+    const segCount = Number(state?.esp32?.segment_count || $("esp32SegCount")?.value || 8);
+    const ranges = indicesToFracRanges(esp32Selected, segCount);
+    if ($("teEsp32Segments")) $("teEsp32Segments").value = esp32Selected.join(",");
+    if ($("teEsp32SegCount")) $("teEsp32SegCount").value = String(segCount);
+    if ($("teEsp32Ranges")) $("teEsp32Ranges").value = JSON.stringify(ranges);
+    if ($("teEsp32Target")) $("teEsp32Target").value = "segments";
+    syncTeEsp32TargetUi();
+  });
 
   $("bleMode").addEventListener("change", () => {
     const mid = Number($("bleMode").value);
@@ -2146,7 +2731,14 @@
   } catch (_) {}
   try {
     esp32Palette = createLedPalette(
-      "esp32Sv", "esp32Hue", "esp32R", "esp32G", "esp32B", "esp32Swatch", "esp32RgbLabel"
+      "esp32Sv",
+      "esp32Hue",
+      "esp32R",
+      "esp32G",
+      "esp32B",
+      "esp32Swatch",
+      "esp32RgbLabel",
+      () => livePaintEsp32Selection()
     );
   } catch (_) {}
 

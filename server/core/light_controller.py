@@ -267,6 +267,259 @@ def _default_tile() -> dict[str, Any]:
         "led_brightness": 100.0,
         "led_mode": None,
         "led_speed": 50,
+        # ESP32: all | segments | group
+        "esp32_target": "all",
+        "esp32_segments": [],
+        "esp32_segment_count": None,  # 保存時の分割数（再マップ用）
+        "esp32_ranges": [],  # [[start_frac, end_frac], ...] 0..1
+        "esp32_group_id": None,
+        # color | pattern
+        "esp32_fx": "color",
+        "esp32_pattern_id": None,
+        "esp32_pattern_speed": 1.0,
+        "esp32_others_off": True,
+    }
+
+
+def _esp32_indices_to_ranges(
+    indices: list[int], segment_count: int
+) -> list[list[float]]:
+    """区間インデックス → ストリップ上の正規化範囲（連続区間は結合）。"""
+    n = max(1, int(segment_count))
+    clean = sorted({max(0, min(n - 1, int(i))) for i in (indices or [])})
+    if not clean:
+        return []
+    ranges: list[list[float]] = []
+    start = clean[0]
+    prev = clean[0]
+    for i in clean[1:]:
+        if i == prev + 1:
+            prev = i
+            continue
+        ranges.append([start / n, (prev + 1) / n])
+        start = prev = i
+    ranges.append([start / n, (prev + 1) / n])
+    return ranges
+
+
+def _esp32_normalize_ranges(
+    ranges: list[list[float]] | list[tuple[float, float]] | None,
+) -> list[list[float]]:
+    out: list[list[float]] = []
+    for raw in ranges or []:
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            continue
+        try:
+            a = max(0.0, min(1.0, float(raw[0])))
+            b = max(0.0, min(1.0, float(raw[1])))
+        except (TypeError, ValueError):
+            continue
+        if b < a:
+            a, b = b, a
+        if b - a > 1e-12:
+            out.append([a, b])
+    return out
+
+
+def _esp32_ranges_to_indices(
+    ranges: list[list[float]] | list[tuple[float, float]], segment_count: int
+) -> list[int]:
+    """正規化範囲 → 現在の分割数での区間インデックス（重なりがあれば含む・UI用）。"""
+    n = max(1, int(segment_count))
+    out: set[int] = set()
+    for a, b in _esp32_normalize_ranges(ranges):
+        for i in range(n):
+            s = i / n
+            e = (i + 1) / n
+            if e > a + 1e-12 and s < b - 1e-12:
+                out.add(i)
+    return sorted(out)
+
+
+def _esp32_ranges_to_pixel_spans(
+    ranges: list[list[float]] | list[tuple[float, float]],
+    pixel_count: int,
+) -> list[tuple[int, int]]:
+    """正規化範囲 → 正確なピクセル半開区間 [start, end)。分割数に依存しない。"""
+    n = max(1, int(pixel_count))
+    spans: list[tuple[int, int]] = []
+    for a, b in _esp32_normalize_ranges(ranges):
+        start = int(math.floor(a * n + 1e-12))
+        end = int(math.ceil(b * n - 1e-12))
+        start = max(0, min(n, start))
+        end = max(0, min(n, end))
+        if end <= start and b > a:
+            end = min(n, start + 1)
+        if end > start:
+            spans.append((start, end))
+    # merge overlaps
+    if not spans:
+        return []
+    spans.sort()
+    merged: list[tuple[int, int]] = [spans[0]]
+    for s, e in spans[1:]:
+        ps, pe = merged[-1]
+        if s <= pe:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _esp32_pixel_spans_to_set(
+    spans: list[tuple[int, int]], pixel_count: int
+) -> set[int]:
+    n = max(1, int(pixel_count))
+    out: set[int] = set()
+    for s, e in spans:
+        for i in range(max(0, s), min(n, e)):
+            out.add(i)
+    return out
+
+
+def _esp32_normalize_pixel_spans(
+    spans: list[list[int]] | list[tuple[int, int]] | None,
+    pixel_count: int,
+) -> list[list[int]]:
+    """絶対ピクセル半開区間 [start, end) を正規化・結合。分割数変換はしない。"""
+    n = max(1, int(pixel_count))
+    cleaned: list[tuple[int, int]] = []
+    for raw in spans or []:
+        if not isinstance(raw, (list, tuple)) or len(raw) < 2:
+            continue
+        try:
+            s = int(raw[0])
+            e = int(raw[1])
+        except (TypeError, ValueError):
+            continue
+        if e < s:
+            s, e = e, s
+        s = max(0, min(n, s))
+        e = max(0, min(n, e))
+        if e > s:
+            cleaned.append((s, e))
+    if not cleaned:
+        return []
+    cleaned.sort()
+    merged: list[list[int]] = [[cleaned[0][0], cleaned[0][1]]]
+    for s, e in cleaned[1:]:
+        if s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return merged
+
+
+def _esp32_segment_pixel_bounds(
+    segment_count: int, pixel_count: int
+) -> list[tuple[int, int]]:
+    n_pix = max(1, int(pixel_count))
+    n_seg = max(1, int(segment_count))
+    base = n_pix // n_seg
+    rem = n_pix % n_seg
+    out: list[tuple[int, int]] = []
+    start = 0
+    for i in range(n_seg):
+        length = base + (1 if i < rem else 0)
+        end = start + length
+        out.append((start, end))
+        start = end
+    return out
+
+
+def _esp32_indices_to_pixel_spans(
+    indices: list[int], segment_count: int, pixel_count: int
+) -> list[list[int]]:
+    """保存時点の分割で選んだ区間 → 絶対ピクセル範囲（以後変換しない）。"""
+    bounds = _esp32_segment_pixel_bounds(segment_count, pixel_count)
+    n = len(bounds)
+    chosen = sorted(
+        {max(0, min(n - 1, int(i))) for i in (indices or []) if n > 0}
+    )
+    spans = [list(bounds[i]) for i in chosen if 0 <= i < n]
+    return _esp32_normalize_pixel_spans(spans, pixel_count)
+
+
+def _esp32_spans_overlap_indices(
+    spans: list[list[int]] | list[tuple[int, int]],
+    segment_count: int,
+    pixel_count: int,
+) -> list[int]:
+    """表示用: 現在分割のどの区間が保存ピクセルと重なるか（グループ定義の変換ではない）。"""
+    bounds = _esp32_segment_pixel_bounds(segment_count, pixel_count)
+    hit: set[int] = set()
+    for i, (a, b) in enumerate(bounds):
+        for s, e in spans or []:
+            if e > a and s < b:
+                hit.add(i)
+                break
+    return sorted(hit)
+
+
+def _esp32_remap_indices(
+    indices: list[int], from_count: int, to_count: int
+) -> list[int]:
+    if int(from_count) == int(to_count):
+        n = max(1, int(to_count))
+        return sorted({max(0, min(n - 1, int(i))) for i in (indices or [])})
+    ranges = _esp32_indices_to_ranges(indices, from_count)
+    return _esp32_ranges_to_indices(ranges, to_count)
+
+
+def _normalize_esp32_group(
+    raw: dict[str, Any],
+    *,
+    fallback_segment_count: int = 8,
+    fallback_pixel_count: int = 720,
+) -> dict[str, Any] | None:
+    """グループは絶対ピクセル spans で保持。分割数による再マップは行わない。"""
+    gid = str(raw.get("id") or "").strip()
+    name = str(raw.get("name") or "").strip() or "グループ"
+    if not gid:
+        return None
+    try:
+        pc = int(raw.get("pixel_count") or fallback_pixel_count or 720)
+    except (TypeError, ValueError):
+        pc = max(1, int(fallback_pixel_count or 720))
+    pc = max(1, min(2040, pc))
+
+    spans = _esp32_normalize_pixel_spans(raw.get("spans") or [], pc)
+    if not spans:
+        # 旧形式: ranges / indices → 保存時のピクセルへ一度だけ変換
+        try:
+            sc = int(raw.get("segment_count") or fallback_segment_count or 8)
+        except (TypeError, ValueError):
+            sc = max(1, int(fallback_segment_count or 8))
+        sc = max(1, min(64, sc))
+        idxs_raw = raw.get("indices") or []
+        indices: list[int] = []
+        if isinstance(idxs_raw, list):
+            indices = sorted(
+                {
+                    max(0, min(sc - 1, int(i)))
+                    for i in idxs_raw
+                    if isinstance(i, (int, float)) or str(i).isdigit()
+                }
+            )
+        ranges = _esp32_normalize_ranges(raw.get("ranges") or [])
+        if not ranges and indices:
+            ranges = _esp32_indices_to_ranges(indices, sc)
+        if ranges:
+            spans = [
+                [s, e]
+                for s, e in _esp32_ranges_to_pixel_spans(ranges, pc)
+            ]
+        elif indices:
+            spans = _esp32_indices_to_pixel_spans(indices, sc, pc)
+    if not spans:
+        return None
+    px_total = sum(e - s for s, e in spans)
+    return {
+        "id": gid[:64],
+        "name": name[:40],
+        "spans": spans,
+        "pixel_count": pc,
+        "pixel_total": px_total,
     }
 
 
@@ -298,12 +551,69 @@ def _normalize_tile(raw: dict[str, Any]) -> dict[str, Any]:
     else:
         base["led_mode"] = int(lm)
     base["led_speed"] = max(0, min(100, int(base.get("led_speed", 50))))
+    tgt = str(base.get("esp32_target") or "all").strip().lower()
+    if tgt not in ("all", "segments", "group"):
+        tgt = "all"
+    base["esp32_target"] = tgt
+    segs_raw = base.get("esp32_segments") or []
+    if not isinstance(segs_raw, list):
+        segs_raw = []
+    base["esp32_segments"] = sorted(
+        {
+            max(0, min(63, int(x)))
+            for x in segs_raw
+            if str(x).lstrip("-").isdigit() or isinstance(x, int)
+        }
+    )
+    sc_raw = base.get("esp32_segment_count")
+    if sc_raw in (None, "", "null"):
+        base["esp32_segment_count"] = None
+    else:
+        try:
+            base["esp32_segment_count"] = max(1, min(64, int(sc_raw)))
+        except (TypeError, ValueError):
+            base["esp32_segment_count"] = None
+    ranges_raw = base.get("esp32_ranges") or []
+    ranges: list[list[float]] = []
+    if isinstance(ranges_raw, list):
+        for rr in ranges_raw:
+            if not isinstance(rr, (list, tuple)) or len(rr) < 2:
+                continue
+            try:
+                a = max(0.0, min(1.0, float(rr[0])))
+                b = max(0.0, min(1.0, float(rr[1])))
+            except (TypeError, ValueError):
+                continue
+            if b < a:
+                a, b = b, a
+            if b - a > 1e-9:
+                ranges.append([a, b])
+    if not ranges and base["esp32_segments"]:
+        sc = base["esp32_segment_count"] or max(1, (max(base["esp32_segments"]) + 1))
+        ranges = _esp32_indices_to_ranges(base["esp32_segments"], sc)
+        if base["esp32_segment_count"] is None:
+            base["esp32_segment_count"] = sc
+    base["esp32_ranges"] = ranges
+    gid = base.get("esp32_group_id")
+    base["esp32_group_id"] = None if gid in (None, "", "null") else str(gid)[:64]
+    fx = str(base.get("esp32_fx") or "color").strip().lower()
+    base["esp32_fx"] = "pattern" if fx == "pattern" else "color"
+    pid = base.get("esp32_pattern_id")
+    base["esp32_pattern_id"] = None if pid in (None, "", "null") else str(pid)[:64]
+    try:
+        base["esp32_pattern_speed"] = max(
+            0.05, min(5.0, float(base.get("esp32_pattern_speed", 1.0) or 1.0))
+        )
+    except (TypeError, ValueError):
+        base["esp32_pattern_speed"] = 1.0
+    base["esp32_others_off"] = bool(base.get("esp32_others_off", True))
     return base
 
 TILES_PATH = DMX_DIR / "pattern_tiles.json"
 DATA_DIR = ROOT / "server" / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
 PROJECT_DIR = DATA_DIR / "projects"
+ESP32_GROUPS_PATH = DATA_DIR / "esp32_groups.json"
 
 
 @dataclass
@@ -403,6 +713,20 @@ class LightController:
     _esp32_color: tuple[int, int, int] = (255, 80, 40)
     _esp32_brightness: float = 1.0
     _esp32_color2: tuple[int, int, int] = (40, 80, 255)
+    esp32_segment_count: int = 8
+    # each: {"r":int,"g":int,"b":int,"on":bool}
+    esp32_segments: list[dict[str, Any]] = field(default_factory=list)
+    esp32_selected: list[int] = field(default_factory=list)
+    esp32_groups: list[dict[str, Any]] = field(default_factory=list)
+    _esp32_pattern_mask: set[int] | None = None  # segment indices (legacy)
+    _esp32_pattern_pixel_mask: set[int] | None = None  # exact pixels
+    _esp32_pattern_others_off: bool = True
+    _esp32_pattern_ignore_holds: bool = False
+    _esp32_compose_stop: threading.Event = field(default_factory=threading.Event)
+    _esp32_compose_thread: threading.Thread | None = None
+    _esp32_compose_t0: float = 0.0
+    esp32_overlap_warnings: list[dict[str, Any]] = field(default_factory=list)
+    esp32_last_overlap_alert: dict[str, Any] | None = None
 
     # AI
     _analyzer: Any = None
@@ -458,6 +782,17 @@ class LightController:
             )
         except (TypeError, ValueError):
             self.esp32_pixel_count = 720
+        try:
+            self.esp32_segment_count = max(
+                1, min(64, int(s.get("esp32_segment_count", 8) or 8))
+            )
+        except (TypeError, ValueError):
+            self.esp32_segment_count = 8
+        self._esp32_init_segments(self.esp32_segment_count, keep_colors=False)
+        self.esp32_groups = self._load_esp32_groups()
+        # 旧 ranges/indices 形式を spans に移行して保存
+        if self.esp32_groups:
+            self._save_esp32_groups()
         self._artnet.configure(
             host=self.esp32_host,
             universe=self.esp32_universe,
@@ -582,6 +917,10 @@ class LightController:
                     "color": list(self._esp32_color),
                     "color2": list(self._esp32_color2),
                     "brightness": self._esp32_brightness,
+                    "segment_count": self.esp32_segment_count,
+                    "segments": [dict(x) for x in self.esp32_segments],
+                    "selected": list(self.esp32_selected),
+                    "groups": [self._esp32_group_public(g) for g in self.esp32_groups],
                 },
                 "ai": {
                     "active": self.ai_active,
@@ -625,6 +964,8 @@ class LightController:
                     "index": self._cue_hist_i,
                     "length": len(self._cue_hist),
                 },
+                "esp32_overlap_warnings": list(self.esp32_overlap_warnings),
+                "esp32_last_overlap_alert": self.esp32_last_overlap_alert,
                 "last_error": self.last_error,
             }
 
@@ -775,6 +1116,8 @@ class LightController:
                 self.cues.append(cue)
                 self.cues.sort(key=lambda c: (c.t, c.cue_id))
                 recorded = True
+                alert = self._refresh_esp32_overlap_warnings(new_cue=cue)
+                self.esp32_last_overlap_alert = alert
             if source in self.holds:
                 del self.holds[source]
             if source in self.hold_order:
@@ -784,6 +1127,7 @@ class LightController:
         if recorded:
             self._commit_cue_history()
             self._emit("cues")
+            self._emit("esp32")
         self._emit("hold")
 
     def _sync_holds(self) -> None:
@@ -791,13 +1135,15 @@ class LightController:
             self.stop_motion()
             self.set_channels([0] * 10, push=True)
             self._ble_override(None)
+            self._esp32_compose_stop_loop()
+            self.esp32_pattern_stop()
             self._esp32_override(None)
             return
         order = [s for s in self.hold_order if s in self.holds]
         tiles = [self.holds[s] for s in order]
         laser = next((t for t in reversed(tiles) if t.get("apply_laser", True)), None)
         led = next((t for t in reversed(tiles) if t.get("apply_led", False)), None)
-        esp = next((t for t in reversed(tiles) if t.get("apply_esp32", False)), None)
+        esp_tiles = [t for t in tiles if t.get("apply_esp32", False)]
         if led is not None:
             self._ble_override(
                 {
@@ -811,17 +1157,29 @@ class LightController:
             )
         else:
             self._ble_override(None)
-        if esp is not None:
-            self._esp32_override(
-                {
-                    "r": int(esp.get("led_r", 255)),
-                    "g": int(esp.get("led_g", 80)),
-                    "b": int(esp.get("led_b", 40)),
-                    "brightness": float(esp.get("led_brightness", 100.0)) / 100.0,
-                }
-            )
-        else:
+        if not esp_tiles:
+            self._esp32_compose_stop_loop()
+            self.esp32_pattern_stop()
             self._esp32_override(None)
+        elif len(esp_tiles) == 1 and str(esp_tiles[0].get("esp32_fx") or "color") == "pattern":
+            # 単独パターンはそのまま
+            self._esp32_compose_stop_loop()
+            self._esp32_apply_tile(esp_tiles[0])
+        elif len(esp_tiles) == 1:
+            self._esp32_compose_stop_loop()
+            self.esp32_pattern_stop()
+            self._esp32_apply_tile(esp_tiles[0])
+        else:
+            # 複数同時: 重なり区間を等分して両方（複数）点灯
+            self.esp32_pattern_stop()
+            needs_loop = any(
+                str(t.get("esp32_fx") or "color") == "pattern" for t in esp_tiles
+            )
+            if needs_loop:
+                self._esp32_compose_start_loop(esp_tiles)
+            else:
+                self._esp32_compose_stop_loop()
+                self._esp32_compose_push(esp_tiles, time.monotonic())
         if laser is not None:
             self._apply_laser_tile(laser)
         else:
@@ -887,6 +1245,99 @@ class LightController:
         except Exception:
             pass
 
+    def _esp32_init_segments(self, count: int, *, keep_colors: bool = True) -> None:
+        old_count = max(1, int(self.esp32_segment_count or 1))
+        n = max(1, min(64, int(count)))
+        old = list(self.esp32_segments) if keep_colors else []
+        # 色状態も正規化範囲経由で引き継ぐ
+        old_lit_ranges: list[list[float]] = []
+        if keep_colors and old:
+            lit = [i for i, s in enumerate(old) if s.get("on")]
+            if lit:
+                old_lit_ranges = _esp32_indices_to_ranges(lit, old_count)
+        segs: list[dict[str, Any]] = []
+        for i in range(n):
+            segs.append({"r": 0, "g": 0, "b": 0, "on": False})
+        if keep_colors and old:
+            # 代表色: 旧区間の色を重なる新区間へコピー
+            for new_i in range(n):
+                ns, ne = new_i / n, (new_i + 1) / n
+                # 最も重なる旧区間の色を採用
+                best_j = None
+                best_ov = 0.0
+                for j, s in enumerate(old):
+                    os, oe = j / old_count, (j + 1) / old_count
+                    ov = max(0.0, min(ne, oe) - max(ns, os))
+                    if ov > best_ov:
+                        best_ov = ov
+                        best_j = j
+                if best_j is not None and best_ov > 1e-9:
+                    src = old[best_j]
+                    segs[new_i] = {
+                        "r": int(src.get("r", 0)),
+                        "g": int(src.get("g", 0)),
+                        "b": int(src.get("b", 0)),
+                        "on": False,
+                    }
+            for i in _esp32_ranges_to_indices(old_lit_ranges, n):
+                segs[i]["on"] = True
+        # 選択も再マップ
+        if self.esp32_selected:
+            self.esp32_selected = _esp32_remap_indices(
+                self.esp32_selected, old_count, n
+            )
+        self.esp32_segment_count = n
+        self.esp32_segments = segs
+
+    def _esp32_segment_ranges(self) -> list[tuple[int, int]]:
+        n_pix = max(1, int(self.esp32_pixel_count))
+        n_seg = max(1, int(self.esp32_segment_count))
+        base = n_pix // n_seg
+        rem = n_pix % n_seg
+        ranges: list[tuple[int, int]] = []
+        start = 0
+        for i in range(n_seg):
+            length = base + (1 if i < rem else 0)
+            end = start + length
+            ranges.append((start, end))
+            start = end
+        return ranges
+
+    def _esp32_pixels_from_segments(self) -> list[tuple[int, int, int]]:
+        bri = max(0.0, min(1.0, float(self._esp32_brightness)))
+        pixels: list[tuple[int, int, int]] = [(0, 0, 0)] * max(1, self.esp32_pixel_count)
+        ranges = self._esp32_segment_ranges()
+        for i, seg in enumerate(self.esp32_segments):
+            if i >= len(ranges):
+                break
+            a, b = ranges[i]
+            if not seg.get("on", False) or a >= b:
+                col = (0, 0, 0)
+            else:
+                col = (
+                    max(0, min(255, int(round(int(seg.get("r", 0)) * bri)))),
+                    max(0, min(255, int(round(int(seg.get("g", 0)) * bri)))),
+                    max(0, min(255, int(round(int(seg.get("b", 0)) * bri)))),
+                )
+            for p in range(a, b):
+                if p < len(pixels):
+                    pixels[p] = col
+        return pixels
+
+    def _esp32_push_segments(self) -> None:
+        if not self.esp32_enabled or not self.esp32_host:
+            return
+        pixels = self._esp32_pixels_from_segments()
+        self._artnet.send_rgb_buffer(pixels, brightness=1.0)
+        if self._artnet.last_error:
+            self.esp32_status = f"区間送信エラー: {self._artnet.last_error}"
+        else:
+            lit = sum(1 for s in self.esp32_segments if s.get("on"))
+            self.esp32_status = (
+                f"区間送信 {self.esp32_host} "
+                f"{self.esp32_segment_count}分割 / 点灯{lit}"
+            )
+
     def _esp32_override(self, payload: dict[str, Any] | None) -> None:
         if not self.esp32_enabled or not self.esp32_host:
             return
@@ -895,6 +1346,8 @@ class LightController:
             self.esp32_pattern_stop()
         try:
             if payload is None:
+                for seg in self.esp32_segments:
+                    seg["on"] = False
                 self._artnet.blackout()
                 self.esp32_status = f"送信中 {self.esp32_host}（消灯）"
                 return
@@ -908,6 +1361,13 @@ class LightController:
                 max(0, min(255, b)),
             )
             self._esp32_brightness = max(0.0, min(1.0, bri))
+            # 全区間を同じ色に同期（全体単色）
+            on = not (r == 0 and g == 0 and b == 0)
+            for seg in self.esp32_segments:
+                seg["r"] = self._esp32_color[0]
+                seg["g"] = self._esp32_color[1]
+                seg["b"] = self._esp32_color[2]
+                seg["on"] = on
             self._artnet.send_rgb_fill(
                 self._esp32_color[0],
                 self._esp32_color[1],
@@ -1017,6 +1477,11 @@ class LightController:
         r2: int | None = None,
         g2: int | None = None,
         b2: int | None = None,
+        segment_indices: list[int] | None = None,
+        ranges: list[list[float]] | None = None,
+        pixel_spans: list[list[int]] | list[tuple[int, int]] | None = None,
+        others_off: bool = True,
+        ignore_holds: bool = False,
     ) -> None:
         if not self.esp32_enabled:
             raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
@@ -1039,6 +1504,37 @@ class LightController:
         if brightness is not None:
             self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
         self.esp32_pattern_speed = max(0.05, min(5.0, float(speed)))
+        # 絶対ピクセル spans 最優先（グループ）。分割数変換なし
+        abs_spans = _esp32_normalize_pixel_spans(
+            pixel_spans, self.esp32_pixel_count
+        )
+        norm_ranges = _esp32_normalize_ranges(ranges)
+        if abs_spans:
+            self._esp32_pattern_pixel_mask = _esp32_pixel_spans_to_set(
+                [(s, e) for s, e in abs_spans], self.esp32_pixel_count
+            )
+            self._esp32_pattern_mask = None
+        elif norm_ranges:
+            spans = _esp32_ranges_to_pixel_spans(norm_ranges, self.esp32_pixel_count)
+            self._esp32_pattern_pixel_mask = _esp32_pixel_spans_to_set(
+                spans, self.esp32_pixel_count
+            )
+            self._esp32_pattern_mask = None
+        elif segment_indices is None:
+            self._esp32_pattern_mask = None
+            self._esp32_pattern_pixel_mask = None
+        else:
+            # 現在分割の区間 → 正規化範囲 → ピクセル（確実に位置固定）
+            idx_ranges = _esp32_indices_to_ranges(
+                list(segment_indices), self.esp32_segment_count
+            )
+            spans = _esp32_ranges_to_pixel_spans(idx_ranges, self.esp32_pixel_count)
+            self._esp32_pattern_pixel_mask = _esp32_pixel_spans_to_set(
+                spans, self.esp32_pixel_count
+            )
+            self._esp32_pattern_mask = None
+        self._esp32_pattern_others_off = bool(others_off)
+        self._esp32_pattern_ignore_holds = bool(ignore_holds)
         self.esp32_pattern_stop()
         self._esp32_pattern_stop.clear()
         self.esp32_pattern_id = pid
@@ -1055,11 +1551,12 @@ class LightController:
         dt = 1.0 / fps
         t0 = time.monotonic()
         pid = self.esp32_pattern_id
+        ignore_holds = bool(getattr(self, "_esp32_pattern_ignore_holds", False))
         while not self._esp32_pattern_stop.is_set() and self.esp32_enabled:
             if not self.esp32_enabled or not self.esp32_host:
                 break
-            # ポン出しホールド中はパターンを一時停止（タイル色優先）
-            if self.hold_order:
+            # 手動パターン中はホールドで一時停止。タイル起点パターンは継続
+            if self.hold_order and not ignore_holds:
                 if self._esp32_pattern_stop.wait(0.05):
                     break
                 continue
@@ -1075,17 +1572,710 @@ class LightController:
                     speed=self.esp32_pattern_speed,
                     brightness=self._esp32_brightness,
                 )
+                allowed = self._esp32_pattern_pixel_mask
+                if allowed is None and self._esp32_pattern_mask is not None:
+                    # 互換: 区間マスク → ピクセル
+                    seg_ranges = self._esp32_segment_ranges()
+                    allowed = set()
+                    for si in self._esp32_pattern_mask:
+                        if 0 <= si < len(seg_ranges):
+                            a, b = seg_ranges[si]
+                            allowed.update(range(a, b))
+                if allowed is not None:
+                    if self._esp32_pattern_others_off:
+                        pixels = [
+                            px if i in allowed else (0, 0, 0)
+                            for i, px in enumerate(pixels)
+                        ]
+                    else:
+                        base = self._esp32_pixels_from_segments()
+                        pixels = [
+                            px if i in allowed else base[i]
+                            for i, px in enumerate(pixels)
+                        ]
                 self._artnet.send_rgb_buffer(pixels, brightness=1.0)
                 if self._artnet.last_error:
                     self.esp32_status = f"パターン送信エラー: {self._artnet.last_error}"
             except Exception as e:
                 self.esp32_status = f"パターン失敗: {e}"
                 break
-            # フレーム待ち（停止シグナルで即抜ける）
             if self._esp32_pattern_stop.wait(dt):
                 break
         self.esp32_pattern_running = False
+        self._esp32_pattern_ignore_holds = False
         self._emit("esp32")
+
+    def esp32_set_segment_count(self, count: int) -> None:
+        self._esp32_init_segments(count, keep_colors=True)
+        try:
+            update_settings(esp32_segment_count=self.esp32_segment_count)
+        except Exception:
+            pass
+        if self.esp32_enabled and not self.esp32_pattern_running:
+            self._esp32_push_segments()
+        self.esp32_status = f"分割数 {self.esp32_segment_count}"
+        self._emit("esp32")
+
+    def esp32_set_segment(
+        self,
+        index: int,
+        *,
+        r: int | None = None,
+        g: int | None = None,
+        b: int | None = None,
+        on: bool | None = None,
+        brightness: float | None = None,
+        push: bool = True,
+    ) -> None:
+        if not self.esp32_segments:
+            self._esp32_init_segments(self.esp32_segment_count, keep_colors=False)
+        idx = int(index)
+        if idx < 0 or idx >= len(self.esp32_segments):
+            raise RuntimeError(f"区間インデックス不正: {index}")
+        if self.esp32_pattern_running:
+            self.esp32_pattern_stop()
+        if brightness is not None:
+            self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
+        seg = self.esp32_segments[idx]
+        if r is not None and g is not None and b is not None:
+            seg["r"] = max(0, min(255, int(r)))
+            seg["g"] = max(0, min(255, int(g)))
+            seg["b"] = max(0, min(255, int(b)))
+            self._esp32_color = (seg["r"], seg["g"], seg["b"])
+        if on is None:
+            # 色指定のみなら点灯、明示なければ現状維持だが色指定時は点灯
+            if r is not None:
+                seg["on"] = True
+        else:
+            seg["on"] = bool(on)
+        if push:
+            if not self.esp32_enabled:
+                raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+            self._esp32_push_segments()
+        self._emit("esp32")
+
+    def esp32_segments_apply_all(
+        self,
+        *,
+        r: int,
+        g: int,
+        b: int,
+        on: bool = True,
+        brightness: float | None = None,
+    ) -> None:
+        if self.esp32_pattern_running:
+            self.esp32_pattern_stop()
+        if brightness is not None:
+            self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
+        rr = max(0, min(255, int(r)))
+        gg = max(0, min(255, int(g)))
+        bb = max(0, min(255, int(b)))
+        self._esp32_color = (rr, gg, bb)
+        for seg in self.esp32_segments:
+            seg["r"] = rr
+            seg["g"] = gg
+            seg["b"] = bb
+            seg["on"] = bool(on) and not (rr == 0 and gg == 0 and bb == 0)
+        if not self.esp32_enabled:
+            raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+        self._esp32_push_segments()
+        self._emit("esp32")
+
+    def _load_esp32_groups(self) -> list[dict[str, Any]]:
+        try:
+            if not ESP32_GROUPS_PATH.exists():
+                return []
+            raw = json.loads(ESP32_GROUPS_PATH.read_text(encoding="utf-8"))
+            if not isinstance(raw, list):
+                return []
+            out: list[dict[str, Any]] = []
+            for g in raw:
+                if not isinstance(g, dict):
+                    continue
+                norm = _normalize_esp32_group(
+                    g,
+                    fallback_segment_count=self.esp32_segment_count or 8,
+                    fallback_pixel_count=self.esp32_pixel_count or 720,
+                )
+                if norm:
+                    out.append(norm)
+            return out
+        except Exception:
+            return []
+
+    def _save_esp32_groups(self) -> None:
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            payload = []
+            for g in self.esp32_groups:
+                payload.append(
+                    {
+                        "id": g.get("id"),
+                        "name": g.get("name"),
+                        "spans": list(g.get("spans") or []),
+                        "pixel_count": int(
+                            g.get("pixel_count") or self.esp32_pixel_count or 720
+                        ),
+                    }
+                )
+            ESP32_GROUPS_PATH.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _esp32_group_public(self, g: dict[str, Any]) -> dict[str, Any]:
+        """UI向け。spans が本体。overlap_indices は表示用の重なり区間のみ。"""
+        spans = _esp32_normalize_pixel_spans(
+            g.get("spans") or [], self.esp32_pixel_count
+        )
+        overlap = _esp32_spans_overlap_indices(
+            spans, self.esp32_segment_count, self.esp32_pixel_count
+        )
+        px_total = sum(e - s for s, e in spans)
+        return {
+            "id": g.get("id"),
+            "name": g.get("name"),
+            "spans": spans,
+            "pixel_count": int(g.get("pixel_count") or self.esp32_pixel_count or 720),
+            "pixel_total": px_total,
+            "overlap_indices": overlap,
+        }
+
+    def _esp32_resolve_group_spans(self, group_id: str) -> list[list[int]]:
+        gid = str(group_id or "")
+        for g in self.esp32_groups:
+            if g.get("id") == gid:
+                return _esp32_normalize_pixel_spans(
+                    g.get("spans") or [], self.esp32_pixel_count
+                )
+        return []
+
+    def _esp32_resolve_group_indices(self, group_id: str) -> list[int]:
+        """表示・互換用。グループ本体は spans。"""
+        spans = self._esp32_resolve_group_spans(group_id)
+        return _esp32_spans_overlap_indices(
+            spans, self.esp32_segment_count, self.esp32_pixel_count
+        )
+
+    def _esp32_resolve_tile_ranges(
+        self, tile: dict[str, Any]
+    ) -> list[list[float]] | None:
+        """None = 全体。list = 正規化範囲。グループは spans 優先のため None を返し別経路。"""
+        target = str(tile.get("esp32_target") or "all").lower()
+        if target == "segments":
+            ranges = _esp32_normalize_ranges(tile.get("esp32_ranges") or [])
+            if ranges:
+                return ranges
+            idxs = [int(i) for i in (tile.get("esp32_segments") or [])]
+            src_n = int(tile.get("esp32_segment_count") or self.esp32_segment_count or 8)
+            return _esp32_indices_to_ranges(idxs, src_n)
+        if target == "group":
+            return None
+        return None
+
+    def esp32_set_selection(self, indices: list[int]) -> None:
+        n = max(1, self.esp32_segment_count)
+        clean = sorted({max(0, min(n - 1, int(i))) for i in (indices or [])})
+        self.esp32_selected = clean
+        self._emit("esp32")
+
+    def esp32_paint_indices(
+        self,
+        indices: list[int],
+        *,
+        r: int,
+        g: int,
+        b: int,
+        on: bool = True,
+        brightness: float | None = None,
+        others_off: bool = False,
+        segment_count: int | None = None,
+    ) -> None:
+        """区間インデックス指定。保存時分割数が違っても位置比率→ピクセルで正確に塗る。"""
+        src_n = max(1, int(segment_count or self.esp32_segment_count or 8))
+        ranges = _esp32_indices_to_ranges(list(indices or []), src_n)
+        self.esp32_paint_ranges(
+            ranges,
+            r=r,
+            g=g,
+            b=b,
+            on=on,
+            brightness=brightness,
+            others_off=others_off,
+        )
+
+    def esp32_paint_ranges(
+        self,
+        ranges: list[list[float]] | list[tuple[float, float]],
+        *,
+        r: int,
+        g: int,
+        b: int,
+        on: bool = True,
+        brightness: float | None = None,
+        others_off: bool = False,
+    ) -> None:
+        """正規化範囲をピクセル単位で正確に点灯（現在の分割数に依存しない）。"""
+        if not self.esp32_segments:
+            self._esp32_init_segments(self.esp32_segment_count, keep_colors=False)
+        if self.esp32_pattern_running:
+            self.esp32_pattern_stop()
+        if brightness is not None:
+            self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
+        rr = max(0, min(255, int(r)))
+        gg = max(0, min(255, int(g)))
+        bb = max(0, min(255, int(b)))
+        self._esp32_color = (rr, gg, bb)
+        lit = bool(on) and not (rr == 0 and gg == 0 and bb == 0)
+        bri = max(0.0, min(1.0, float(self._esp32_brightness)))
+        col = (
+            max(0, min(255, int(round(rr * bri)))),
+            max(0, min(255, int(round(gg * bri)))),
+            max(0, min(255, int(round(bb * bri)))),
+        ) if lit else (0, 0, 0)
+
+        n_pix = max(1, int(self.esp32_pixel_count))
+        spans = _esp32_ranges_to_pixel_spans(ranges, n_pix)
+        allowed = _esp32_pixel_spans_to_set(spans, n_pix)
+
+        if others_off:
+            pixels = [(0, 0, 0)] * n_pix
+        else:
+            pixels = list(self._esp32_pixels_from_segments())
+            if len(pixels) < n_pix:
+                pixels.extend([(0, 0, 0)] * (n_pix - len(pixels)))
+            elif len(pixels) > n_pix:
+                pixels = pixels[:n_pix]
+
+        for i in allowed:
+            pixels[i] = col
+
+        # UI 区間表示は近似（重なり区間）に同期
+        approx = _esp32_ranges_to_indices(ranges, self.esp32_segment_count)
+        approx_set = set(approx)
+        if others_off:
+            for i, seg in enumerate(self.esp32_segments):
+                if i in approx_set:
+                    seg["r"], seg["g"], seg["b"] = rr, gg, bb
+                    seg["on"] = lit
+                else:
+                    seg["on"] = False
+        else:
+            for i in approx_set:
+                if 0 <= i < len(self.esp32_segments):
+                    seg = self.esp32_segments[i]
+                    seg["r"], seg["g"], seg["b"] = rr, gg, bb
+                    seg["on"] = lit
+
+        if not self.esp32_enabled:
+            raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+        self._artnet.send_rgb_buffer(pixels, brightness=1.0)
+        if self._artnet.last_error:
+            self.esp32_status = f"区間送信エラー: {self._artnet.last_error}"
+        else:
+            self.esp32_status = (
+                f"位置固定送信 {self.esp32_host} "
+                f"{len(spans)}範囲 / {len(allowed)}px"
+            )
+        self._emit("esp32")
+
+    def esp32_paint_pixel_spans(
+        self,
+        spans: list[list[int]] | list[tuple[int, int]],
+        *,
+        r: int,
+        g: int,
+        b: int,
+        on: bool = True,
+        brightness: float | None = None,
+        others_off: bool = False,
+    ) -> None:
+        """絶対ピクセル範囲で点灯（分割数変換なし）。"""
+        if not self.esp32_segments:
+            self._esp32_init_segments(self.esp32_segment_count, keep_colors=False)
+        if self.esp32_pattern_running:
+            self.esp32_pattern_stop()
+        if brightness is not None:
+            self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
+        rr = max(0, min(255, int(r)))
+        gg = max(0, min(255, int(g)))
+        bb = max(0, min(255, int(b)))
+        self._esp32_color = (rr, gg, bb)
+        lit = bool(on) and not (rr == 0 and gg == 0 and bb == 0)
+        bri = max(0.0, min(1.0, float(self._esp32_brightness)))
+        col = (
+            max(0, min(255, int(round(rr * bri)))),
+            max(0, min(255, int(round(gg * bri)))),
+            max(0, min(255, int(round(bb * bri)))),
+        ) if lit else (0, 0, 0)
+
+        n_pix = max(1, int(self.esp32_pixel_count))
+        norm = _esp32_normalize_pixel_spans(spans, n_pix)
+        allowed = _esp32_pixel_spans_to_set(
+            [(s, e) for s, e in norm], n_pix
+        )
+
+        if others_off:
+            pixels = [(0, 0, 0)] * n_pix
+        else:
+            pixels = list(self._esp32_pixels_from_segments())
+            if len(pixels) < n_pix:
+                pixels.extend([(0, 0, 0)] * (n_pix - len(pixels)))
+            elif len(pixels) > n_pix:
+                pixels = pixels[:n_pix]
+
+        for i in allowed:
+            pixels[i] = col
+
+        approx = _esp32_spans_overlap_indices(
+            norm, self.esp32_segment_count, n_pix
+        )
+        approx_set = set(approx)
+        if others_off:
+            for i, seg in enumerate(self.esp32_segments):
+                if i in approx_set:
+                    seg["r"], seg["g"], seg["b"] = rr, gg, bb
+                    seg["on"] = lit
+                else:
+                    seg["on"] = False
+        else:
+            for i in approx_set:
+                if 0 <= i < len(self.esp32_segments):
+                    seg = self.esp32_segments[i]
+                    seg["r"], seg["g"], seg["b"] = rr, gg, bb
+                    seg["on"] = lit
+
+        if not self.esp32_enabled:
+            raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+        self._artnet.send_rgb_buffer(pixels, brightness=1.0)
+        if self._artnet.last_error:
+            self.esp32_status = f"ピクセル送信エラー: {self._artnet.last_error}"
+        else:
+            self.esp32_status = (
+                f"ピクセル固定送信 {self.esp32_host} "
+                f"{len(norm)}範囲 / {len(allowed)}px"
+            )
+        self._emit("esp32")
+
+    def esp32_group_upsert(
+        self,
+        *,
+        name: str,
+        indices: list[int] | None = None,
+        spans: list[list[int]] | None = None,
+        group_id: str | None = None,
+        segment_count: int | None = None,
+        pixel_count: int | None = None,
+    ) -> dict[str, Any]:
+        pc = max(
+            1,
+            min(2040, int(pixel_count or self.esp32_pixel_count or 720)),
+        )
+        n = max(1, min(64, int(segment_count or self.esp32_segment_count or 8)))
+        if spans:
+            norm_spans = _esp32_normalize_pixel_spans(spans, pc)
+        else:
+            clean = sorted({max(0, min(n - 1, int(i))) for i in (indices or [])})
+            if not clean:
+                raise RuntimeError("グループにする区間を選択してください")
+            # 保存時点の分割→ピクセルへ固定。以後分割が変わっても変換しない
+            norm_spans = _esp32_indices_to_pixel_spans(clean, n, pc)
+        if not norm_spans:
+            raise RuntimeError("グループにするピクセル範囲が空です")
+        gid = (group_id or "").strip() or uuid.uuid4().hex[:10]
+        label = (name or "").strip() or f"グループ{len(self.esp32_groups) + 1}"
+        payload = {
+            "id": gid[:64],
+            "name": label[:40],
+            "spans": norm_spans,
+            "pixel_count": pc,
+            "pixel_total": sum(e - s for s, e in norm_spans),
+        }
+        found = False
+        for i, g in enumerate(self.esp32_groups):
+            if g.get("id") == gid:
+                self.esp32_groups[i] = payload
+                found = True
+                break
+        if not found:
+            self.esp32_groups.append(payload)
+        self._save_esp32_groups()
+        self._emit("esp32")
+        return self._esp32_group_public(payload)
+
+    def esp32_group_delete(self, group_id: str) -> None:
+        gid = (group_id or "").strip()
+        self.esp32_groups = [g for g in self.esp32_groups if g.get("id") != gid]
+        self._save_esp32_groups()
+        self._emit("esp32")
+
+    def _esp32_resolve_tile_indices(self, tile: dict[str, Any]) -> list[int] | None:
+        """None = 全体。list = 現在の分割数での対象区間。"""
+        target = str(tile.get("esp32_target") or "all").lower()
+        cur_n = max(1, int(self.esp32_segment_count or 8))
+        if target == "segments":
+            ranges = tile.get("esp32_ranges") or []
+            if ranges:
+                return _esp32_ranges_to_indices(ranges, cur_n)
+            src_n = tile.get("esp32_segment_count")
+            idxs = [int(i) for i in (tile.get("esp32_segments") or [])]
+            if src_n:
+                return _esp32_remap_indices(idxs, int(src_n), cur_n)
+            # 古いタイル: インデックスを現在の分割にクリップ
+            return sorted({max(0, min(cur_n - 1, i)) for i in idxs})
+        if target == "group":
+            return self._esp32_resolve_group_indices(str(tile.get("esp32_group_id") or ""))
+        return None
+
+    def _esp32_tile_pixel_set(self, tile: dict[str, Any]) -> set[int]:
+        n = max(1, int(self.esp32_pixel_count))
+        target = str(tile.get("esp32_target") or "all").lower()
+        if target == "group":
+            spans = self._esp32_resolve_group_spans(
+                str(tile.get("esp32_group_id") or "")
+            )
+            return _esp32_pixel_spans_to_set(
+                [(s, e) for s, e in spans], n
+            )
+        ranges = self._esp32_resolve_tile_ranges(tile)
+        if ranges is None:
+            return set(range(n))
+        spans = _esp32_ranges_to_pixel_spans(ranges, n)
+        return _esp32_pixel_spans_to_set(spans, n)
+
+    def _esp32_layer_color_at(
+        self, tile: dict[str, Any], pixel_i: int, t: float
+    ) -> tuple[int, int, int]:
+        bri = max(0.0, min(1.0, float(tile.get("led_brightness", 100.0)) / 100.0))
+        fx = str(tile.get("esp32_fx") or "color").lower()
+        if fx == "pattern":
+            pid = str(tile.get("esp32_pattern_id") or "").strip()
+            if pid:
+                try:
+                    frames = render_pattern(
+                        pid,
+                        self.esp32_pixel_count,
+                        t,
+                        color=(
+                            int(tile.get("led_r", 255)),
+                            int(tile.get("led_g", 80)),
+                            int(tile.get("led_b", 40)),
+                        ),
+                        speed=float(tile.get("esp32_pattern_speed", 1.0) or 1.0),
+                        brightness=bri,
+                    )
+                    if 0 <= pixel_i < len(frames):
+                        return frames[pixel_i]
+                except Exception:
+                    pass
+        rr = max(0, min(255, int(round(int(tile.get("led_r", 255)) * bri))))
+        gg = max(0, min(255, int(round(int(tile.get("led_g", 80)) * bri))))
+        bb = max(0, min(255, int(round(int(tile.get("led_b", 40)) * bri))))
+        return (rr, gg, bb)
+
+    def _esp32_compose_pixels(
+        self, tiles: list[dict[str, Any]], t: float
+    ) -> list[tuple[int, int, int]]:
+        """複数タイルを合成。同一ピクセルが複数に属する連続区間は等分して両方点灯。"""
+        n = max(1, int(self.esp32_pixel_count))
+        layers: list[tuple[dict[str, Any], set[int]]] = []
+        for tile in tiles:
+            layers.append((tile, self._esp32_tile_pixel_set(tile)))
+        owners: list[tuple[int, ...]] = [tuple() for _ in range(n)]
+        for li, (_tile, pset) in enumerate(layers):
+            for p in pset:
+                if 0 <= p < n:
+                    owners[p] = owners[p] + (li,)
+        out: list[tuple[int, int, int]] = [(0, 0, 0)] * n
+        i = 0
+        while i < n:
+            key = owners[i]
+            j = i + 1
+            while j < n and owners[j] == key:
+                j += 1
+            if key:
+                m = len(key)
+                span = j - i
+                for k, li in enumerate(key):
+                    a = i + (span * k) // m
+                    b = i + (span * (k + 1)) // m
+                    tile = layers[li][0]
+                    for p in range(a, b):
+                        out[p] = self._esp32_layer_color_at(tile, p, t)
+            i = j
+        return out
+
+    def _esp32_compose_push(self, tiles: list[dict[str, Any]], t: float) -> None:
+        if not self.esp32_enabled or not self.esp32_host or not tiles:
+            return
+        try:
+            pixels = self._esp32_compose_pixels(tiles, t)
+            self._artnet.send_rgb_buffer(pixels, brightness=1.0)
+            if self._artnet.last_error:
+                self.esp32_status = f"合成送信エラー: {self._artnet.last_error}"
+            else:
+                self.esp32_status = f"合成送信 {len(tiles)}レイヤ（重なり等分）"
+        except Exception as e:
+            self.esp32_status = f"合成失敗: {e}"
+
+    def _esp32_compose_stop_loop(self) -> None:
+        self._esp32_compose_stop.set()
+        th = self._esp32_compose_thread
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(timeout=0.5)
+        self._esp32_compose_thread = None
+
+    def _esp32_compose_start_loop(self, tiles: list[dict[str, Any]]) -> None:
+        self._esp32_compose_stop_loop()
+        self._esp32_compose_stop.clear()
+        self._esp32_compose_t0 = time.monotonic()
+        snap = [dict(t) for t in tiles]
+
+        def _loop() -> None:
+            fps = 30.0
+            dt = 1.0 / fps
+            while not self._esp32_compose_stop.is_set() and self.esp32_enabled:
+                # 最新ホールドを参照
+                with self._lock:
+                    order = [s for s in self.hold_order if s in self.holds]
+                    cur = [
+                        self.holds[s]
+                        for s in order
+                        if self.holds[s].get("apply_esp32", False)
+                    ]
+                if len(cur) < 2:
+                    break
+                t = time.monotonic() - self._esp32_compose_t0
+                self._esp32_compose_push(cur, t)
+                if self._esp32_compose_stop.wait(dt):
+                    break
+
+        self._esp32_compose_thread = threading.Thread(target=_loop, daemon=True)
+        self._esp32_compose_thread.start()
+        # 初回即時
+        self._esp32_compose_push(snap, 0.0)
+
+    def _esp32_cue_time_overlap(self, a: PunchCue, b: PunchCue) -> bool:
+        a0, a1 = float(a.t), float(a.t) + max(0.02, float(a.hold_sec))
+        b0, b1 = float(b.t), float(b.t) + max(0.02, float(b.hold_sec))
+        return a0 < b1 and b0 < a1
+
+    def _refresh_esp32_overlap_warnings(
+        self, *, new_cue: PunchCue | None = None
+    ) -> dict[str, Any] | None:
+        """ESP32 キューの時間×空間重なりを検出し警告一覧を更新。"""
+        cues = [
+            c
+            for c in self.cues
+            if isinstance(c.tile, dict) and c.tile.get("apply_esp32", False)
+        ]
+        warnings: list[dict[str, Any]] = []
+        alert: dict[str, Any] | None = None
+        for i in range(len(cues)):
+            for j in range(i + 1, len(cues)):
+                a, b = cues[i], cues[j]
+                if not self._esp32_cue_time_overlap(a, b):
+                    continue
+                pa = self._esp32_tile_pixel_set(a.tile)
+                pb = self._esp32_tile_pixel_set(b.tile)
+                inter = pa & pb
+                if not inter:
+                    continue
+                item = {
+                    "cue_a": a.cue_id,
+                    "cue_b": b.cue_id,
+                    "title_a": str(a.tile.get("title") or a.cue_id),
+                    "title_b": str(b.tile.get("title") or b.cue_id),
+                    "t_a": float(a.t),
+                    "t_b": float(b.t),
+                    "hold_a": float(a.hold_sec),
+                    "hold_b": float(b.hold_sec),
+                    "overlap_pixels": len(inter),
+                    "message": (
+                        f"「{a.tile.get('title', '?')}」と「{b.tile.get('title', '?')}」が"
+                        f"時間・位置で重なっています（{len(inter)}px）。"
+                        "同時点灯時は重なり区間を半分ずつ点灯します。"
+                    ),
+                }
+                warnings.append(item)
+                if new_cue is not None and (
+                    new_cue.cue_id == a.cue_id or new_cue.cue_id == b.cue_id
+                ):
+                    alert = item
+        self.esp32_overlap_warnings = warnings
+        return alert
+
+    def _esp32_apply_tile(self, tile: dict[str, Any]) -> None:
+        if not self.esp32_enabled or not self.esp32_host:
+            return
+        bri = float(tile.get("led_brightness", 100.0)) / 100.0
+        r = int(tile.get("led_r", 255))
+        g = int(tile.get("led_g", 80))
+        b = int(tile.get("led_b", 40))
+        others_off = bool(tile.get("esp32_others_off", True))
+        target = str(tile.get("esp32_target") or "all").lower()
+        group_spans = (
+            self._esp32_resolve_group_spans(str(tile.get("esp32_group_id") or ""))
+            if target == "group"
+            else None
+        )
+        ranges = None if group_spans is not None else self._esp32_resolve_tile_ranges(tile)
+        fx = str(tile.get("esp32_fx") or "color").lower()
+        if fx == "pattern":
+            pid = str(tile.get("esp32_pattern_id") or "").strip()
+            if not pid:
+                fx = "color"
+            else:
+                try:
+                    self.esp32_pattern_start(
+                        pid,
+                        speed=float(tile.get("esp32_pattern_speed", 1.0) or 1.0),
+                        brightness=bri,
+                        r=r,
+                        g=g,
+                        b=b,
+                        ranges=None if group_spans is not None else ranges,
+                        pixel_spans=group_spans,
+                        others_off=others_off,
+                        ignore_holds=True,
+                    )
+                except Exception as e:
+                    self.esp32_status = f"タイルパターン失敗: {e}"
+                return
+        # color — グループは絶対ピクセル、区間は正規化範囲、なければ全体
+        if group_spans is not None:
+            if not group_spans:
+                self._esp32_override({"r": 0, "g": 0, "b": 0, "brightness": 0.0})
+                return
+            try:
+                self.esp32_paint_pixel_spans(
+                    group_spans,
+                    r=r,
+                    g=g,
+                    b=b,
+                    on=True,
+                    brightness=bri,
+                    others_off=others_off,
+                )
+            except Exception as e:
+                self.esp32_status = f"タイルグループ失敗: {e}"
+        elif ranges is None:
+            self._esp32_override({"r": r, "g": g, "b": b, "brightness": bri})
+        else:
+            try:
+                self.esp32_paint_ranges(
+                    ranges,
+                    r=r,
+                    g=g,
+                    b=b,
+                    on=True,
+                    brightness=bri,
+                    others_off=others_off,
+                )
+            except Exception as e:
+                self.esp32_status = f"タイル区間失敗: {e}"
 
     def esp32_probe(self) -> dict[str, Any]:
         """PixelCtl HTTP /api/status を叩いて存在確認（任意）。"""
@@ -1760,7 +2950,10 @@ class LightController:
         self.cues = [c for c in self.cues if c.cue_id not in ids]
         if len(self.cues) != before:
             self._commit_cue_history()
+            self.esp32_last_overlap_alert = None
+            self._refresh_esp32_overlap_warnings()
         self._emit("cues")
+        self._emit("esp32")
 
     def clear_cues(self) -> None:
         if not self.cues:
@@ -1768,7 +2961,10 @@ class LightController:
             return
         self.cues.clear()
         self._commit_cue_history()
+        self.esp32_overlap_warnings = []
+        self.esp32_last_overlap_alert = None
         self._emit("cues")
+        self._emit("esp32")
 
     def _cues_to_snap(self) -> list[dict[str, Any]]:
         return [
@@ -1831,7 +3027,10 @@ class LightController:
             return False
         self._cue_hist_i -= 1
         self.cues = self._cues_from_snap(self._cue_hist[self._cue_hist_i])
+        self.esp32_last_overlap_alert = None
+        self._refresh_esp32_overlap_warnings()
         self._emit("cues")
+        self._emit("esp32")
         return True
 
     def redo_cues(self) -> bool:
@@ -1839,7 +3038,10 @@ class LightController:
             return False
         self._cue_hist_i += 1
         self.cues = self._cues_from_snap(self._cue_hist[self._cue_hist_i])
+        self.esp32_last_overlap_alert = None
+        self._refresh_esp32_overlap_warnings()
         self._emit("cues")
+        self._emit("esp32")
         return True
 
     def set_zoom(self, zoom: float, view_start: float | None = None) -> None:
@@ -1919,6 +3121,8 @@ class LightController:
         out.sort(key=lambda c: (c.t, c.cue_id))
         self.cues = out
         self._reset_cue_history()
+        self.esp32_last_overlap_alert = None
+        self._refresh_esp32_overlap_warnings()
         try:
             self.zoom = max(1.0, min(64.0, float(raw.get("zoom", 1.0))))
             self.view_start = max(0.0, float(raw.get("view_start", 0.0)))
@@ -1926,8 +3130,11 @@ class LightController:
             pass
         self._emit("timeline")
         self._emit("cues")
+        self._emit("esp32")
 
     def shutdown(self) -> None:
+        self._esp32_compose_stop_loop()
+        self.esp32_pattern_stop()
         self.stop_playback()
         self.ai_stop()
         self.dmx_disconnect()

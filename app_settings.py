@@ -27,6 +27,7 @@ _DEFAULTS: dict[str, Any] = {
     "esp32_pixel_count": 720,
     "esp32_enabled": False,
     "esp32_auto_connect": False,
+    "esp32_segment_count": 8,
 }
 
 _lock = threading.Lock()

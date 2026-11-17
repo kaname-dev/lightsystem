@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Light System</title>
-  <link rel="stylesheet" href="/static/styles.css?v=20260317b" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260318pxg" />
 </head>
 <body>
   <header class="top">
@@ -65,6 +65,7 @@
             <button type="button" id="btnCueRedo" title="Ctrl+Y">↪ 先送り</button>
             <span id="cueHistStatus" class="badge">履歴 —</span>
           </div>
+          <div id="esp32OverlapWarn" class="esp32-overlap-warn" hidden></div>
           <select id="cueList" multiple size="12"></select>
           <p class="hint">Ctrl / Shift+クリックで複数選択。Delete=選択削除 ／ Ctrl+Z=巻き戻し ／ Ctrl+Y=先送り</p>
         </div>
@@ -170,7 +171,44 @@
             <input type="hidden" id="teLedB" value="40" />
           </div>
           <div class="row wrap" id="teColorPresets"></div>
-          <p class="hint">固定色のときパレット色が使われます。エフェクト選択時はモード優先です。</p>
+          <p class="hint">BLE は色／内蔵エフェクト。ESP32 は下の対象設定も使います。</p>
+        </section>
+
+        <section id="teEsp32Panel" class="sb-device-panel" hidden>
+          <h4>ESP32 対象・演出</h4>
+          <label class="sb-field">対象
+            <select id="teEsp32Target">
+              <option value="all">全体</option>
+              <option value="segments">区間（選択を保存）</option>
+              <option value="group">グループ</option>
+            </select>
+          </label>
+          <label class="sb-field">グループ
+            <select id="teEsp32Group"></select>
+          </label>
+          <div class="sb-field">
+            <span>保存する区間</span>
+            <div id="teEsp32SegChips" class="esp32-chip-row"></div>
+            <button type="button" id="btnTeEsp32UseSelection" class="preset-btn">現在の選択を取り込み</button>
+          </div>
+          <label class="sb-field">演出
+            <select id="teEsp32Fx">
+              <option value="color">単色</option>
+              <option value="pattern">パターンプリセット</option>
+            </select>
+          </label>
+          <label class="sb-field">パターン
+            <select id="teEsp32Pattern"></select>
+          </label>
+          <label class="sb-field">パターン速度
+            <input type="range" id="teEsp32PatSpeed" min="5" max="300" value="100" />
+            <span id="teEsp32PatSpeedVal">1.00×</span>
+          </label>
+          <label class="sb-check"><input type="checkbox" id="teEsp32OthersOff" checked /> 対象外は消灯</label>
+          <input type="hidden" id="teEsp32Segments" value="" />
+          <input type="hidden" id="teEsp32SegCount" value="" />
+          <input type="hidden" id="teEsp32Ranges" value="[]" />
+          <p class="hint">区間は保存時の位置比率、グループは絶対ピクセルで保持します（グループは分割数を変えても変換しません）。</p>
         </section>
       </div>
       <footer class="tile-sidebar-foot">
@@ -364,12 +402,34 @@
           </div>
         </div>
       </div>
+      <h4 style="margin-top:16px">区間分割・選択・グループ</h4>
+      <p class="hint">クリックで選択（Ctrl=複数、Shift=範囲）。色を動かすと選択中だけライブ反映。グループは選択時点のピクセル範囲で保存し、分割を変えても位置は固定です。</p>
+      <div class="row wrap">
+        <label>分割数
+          <input type="number" id="esp32SegCount" min="1" max="64" value="8" />
+        </label>
+        <button type="button" id="btnEsp32SegApply" class="primary">分割を適用</button>
+        <button type="button" id="btnEsp32SelAll">全選択</button>
+        <button type="button" id="btnEsp32SelClear">選択解除</button>
+        <button type="button" id="btnEsp32SegAllOff">全消灯</button>
+        <span id="esp32SegInfo" class="hint"></span>
+      </div>
+      <div id="esp32SegmentStrip" class="esp32-seg-strip" aria-label="LED区間"></div>
+      <div class="row wrap">
+        <label class="grow">グループ名
+          <input type="text" id="esp32GroupName" placeholder="例: 左右端" maxlength="40" />
+        </label>
+        <button type="button" id="btnEsp32GroupSave" class="primary">選択をグループ保存</button>
+        <button type="button" id="btnEsp32GroupDelete">選択グループ削除</button>
+      </div>
+      <div class="row wrap" id="esp32GroupList"></div>
+
       <h4 style="margin-top:16px">パターンプリセット</h4>
       <p class="hint">先頭がクラブ定番（ストロボ／ドロップ／UV 等）。メイン色を使う演出もあります。速度スライダーで BPM 感を調整。</p>
       <div class="row wrap" id="esp32PatternPresets"></div>
     </section>
   </main>
 
-  <script src="/static/app.js?v=20260317b"></script>
+  <script src="/static/app.js?v=20260318pxg"></script>
 </body>
 </html>

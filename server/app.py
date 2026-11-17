@@ -100,6 +100,60 @@ class Esp32PatternBody(BaseModel):
     r2: int | None = None
     g2: int | None = None
     b2: int | None = None
+    segment_indices: list[int] | None = None
+    ranges: list[list[float]] | None = None
+    others_off: bool = True
+
+
+class Esp32SegmentCountBody(BaseModel):
+    count: int = 8
+
+
+class Esp32SegmentBody(BaseModel):
+    index: int
+    r: int | None = None
+    g: int | None = None
+    b: int | None = None
+    on: bool | None = None
+    brightness: float | None = None
+
+
+class Esp32SegmentsFillBody(BaseModel):
+    r: int = 255
+    g: int = 80
+    b: int = 40
+    on: bool = True
+    brightness: float | None = None
+
+
+class Esp32SelectionBody(BaseModel):
+    indices: list[int] = []
+
+
+class Esp32PaintBody(BaseModel):
+    indices: list[int] = []
+    ranges: list[list[float]] | None = None
+    spans: list[list[int]] | None = None
+    segment_count: int | None = None
+    r: int = 255
+    g: int = 80
+    b: int = 40
+    on: bool = True
+    brightness: float | None = None
+    others_off: bool = False
+
+
+class Esp32GroupBody(BaseModel):
+    name: str = "グループ"
+    indices: list[int] = []
+    spans: list[list[int]] | None = None
+    group_id: str | None = None
+    segment_count: int | None = None
+    pixel_count: int | None = None
+
+
+class Esp32GroupIdBody(BaseModel):
+    group_id: str
 
 
 class HeightBody(BaseModel):
@@ -347,6 +401,9 @@ def api_esp32_pattern(body: Esp32PatternBody) -> dict[str, Any]:
         r2=body.r2,
         g2=body.g2,
         b2=body.b2,
+        segment_indices=body.segment_indices,
+        ranges=body.ranges,
+        others_off=body.others_off,
     )
     return {"ok": True, "state": ctrl.snapshot()}
 
@@ -354,6 +411,104 @@ def api_esp32_pattern(body: Esp32PatternBody) -> dict[str, Any]:
 @app.post("/api/esp32/pattern/stop")
 def api_esp32_pattern_stop() -> dict[str, Any]:
     _ok_call(ctrl.esp32_pattern_stop)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/segments/count")
+def api_esp32_segments_count(body: Esp32SegmentCountBody) -> dict[str, Any]:
+    _ok_call(ctrl.esp32_set_segment_count, body.count)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/segment")
+def api_esp32_segment(body: Esp32SegmentBody) -> dict[str, Any]:
+    _ok_call(
+        ctrl.esp32_set_segment,
+        body.index,
+        r=body.r,
+        g=body.g,
+        b=body.b,
+        on=body.on,
+        brightness=body.brightness,
+    )
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/segments/fill")
+def api_esp32_segments_fill(body: Esp32SegmentsFillBody) -> dict[str, Any]:
+    _ok_call(
+        ctrl.esp32_segments_apply_all,
+        r=body.r,
+        g=body.g,
+        b=body.b,
+        on=body.on,
+        brightness=body.brightness,
+    )
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/selection")
+def api_esp32_selection(body: Esp32SelectionBody) -> dict[str, Any]:
+    _ok_call(ctrl.esp32_set_selection, body.indices)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/paint")
+def api_esp32_paint(body: Esp32PaintBody) -> dict[str, Any]:
+    if body.spans:
+        _ok_call(
+            ctrl.esp32_paint_pixel_spans,
+            body.spans,
+            r=body.r,
+            g=body.g,
+            b=body.b,
+            on=body.on,
+            brightness=body.brightness,
+            others_off=body.others_off,
+        )
+    elif body.ranges:
+        _ok_call(
+            ctrl.esp32_paint_ranges,
+            body.ranges,
+            r=body.r,
+            g=body.g,
+            b=body.b,
+            on=body.on,
+            brightness=body.brightness,
+            others_off=body.others_off,
+        )
+    else:
+        _ok_call(
+            ctrl.esp32_paint_indices,
+            body.indices,
+            r=body.r,
+            g=body.g,
+            b=body.b,
+            on=body.on,
+            brightness=body.brightness,
+            others_off=body.others_off,
+            segment_count=body.segment_count,
+        )
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/groups")
+def api_esp32_groups_upsert(body: Esp32GroupBody) -> dict[str, Any]:
+    group = _ok_call(
+        ctrl.esp32_group_upsert,
+        name=body.name,
+        indices=body.indices,
+        spans=body.spans,
+        group_id=body.group_id,
+        segment_count=body.segment_count,
+        pixel_count=body.pixel_count,
+    )
+    return {"ok": True, "group": group, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/groups/delete")
+def api_esp32_groups_delete(body: Esp32GroupIdBody) -> dict[str, Any]:
+    _ok_call(ctrl.esp32_group_delete, body.group_id)
     return {"ok": True, "state": ctrl.snapshot()}
 
 
