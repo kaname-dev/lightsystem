@@ -27,6 +27,10 @@ for p in (str(BLE_APP), str(DMX_DIR), str(ROOT)):
 
 from server.core.dmx_sender import DMX_CHANNELS, OpenDMXSender, list_com_ports  # noqa: E402
 from server.core.artnet_sender import ArtNetSender  # noqa: E402
+from server.core.esp32_patterns import (  # noqa: E402
+    ESP32_PATTERN_PRESETS,
+    render_pattern,
+)
 
 try:
     import sounddevice as sd
@@ -386,11 +390,19 @@ class LightController:
     _artnet: ArtNetSender = field(default_factory=ArtNetSender)
     esp32_host: str = ""
     esp32_universe: int = 0
-    esp32_pixel_count: int = 170
+    esp32_pixel_count: int = 720
     esp32_enabled: bool = False
     esp32_auto_connect: bool = False
     esp32_status: str = "無効"
     _ai_esp_last: float = 0.0
+    esp32_pattern_id: str = ""
+    esp32_pattern_speed: float = 1.0
+    esp32_pattern_running: bool = False
+    _esp32_pattern_stop: threading.Event = field(default_factory=threading.Event)
+    _esp32_pattern_thread: threading.Thread | None = None
+    _esp32_color: tuple[int, int, int] = (255, 80, 40)
+    _esp32_brightness: float = 1.0
+    _esp32_color2: tuple[int, int, int] = (40, 80, 255)
 
     # AI
     _analyzer: Any = None
@@ -441,9 +453,11 @@ class LightController:
         except (TypeError, ValueError):
             self.esp32_universe = 0
         try:
-            self.esp32_pixel_count = max(1, min(170, int(s.get("esp32_pixel_count", 170) or 170)))
+            self.esp32_pixel_count = max(
+                1, min(2040, int(s.get("esp32_pixel_count", 720) or 720))
+            )
         except (TypeError, ValueError):
-            self.esp32_pixel_count = 170
+            self.esp32_pixel_count = 720
         self._artnet.configure(
             host=self.esp32_host,
             universe=self.esp32_universe,
@@ -561,6 +575,13 @@ class LightController:
                     "status": self.esp32_status,
                     "last_rgb": list(self._artnet.last_rgb),
                     "last_error": self._artnet.last_error,
+                    "pattern_id": self.esp32_pattern_id,
+                    "pattern_speed": self.esp32_pattern_speed,
+                    "pattern_running": self.esp32_pattern_running,
+                    "patterns": list(ESP32_PATTERN_PRESETS),
+                    "color": list(self._esp32_color),
+                    "color2": list(self._esp32_color2),
+                    "brightness": self._esp32_brightness,
                 },
                 "ai": {
                     "active": self.ai_active,
@@ -869,22 +890,35 @@ class LightController:
     def _esp32_override(self, payload: dict[str, Any] | None) -> None:
         if not self.esp32_enabled or not self.esp32_host:
             return
+        # 固体色オーバーライド時はパターン停止
+        if payload is not None and self.esp32_pattern_running:
+            self.esp32_pattern_stop()
         try:
             if payload is None:
                 self._artnet.blackout()
                 self.esp32_status = f"送信中 {self.esp32_host}（消灯）"
                 return
+            r = int(payload.get("r", 0))
+            g = int(payload.get("g", 0))
+            b = int(payload.get("b", 0))
+            bri = float(payload.get("brightness", 1.0))
+            self._esp32_color = (
+                max(0, min(255, r)),
+                max(0, min(255, g)),
+                max(0, min(255, b)),
+            )
+            self._esp32_brightness = max(0.0, min(1.0, bri))
             self._artnet.send_rgb_fill(
-                int(payload.get("r", 0)),
-                int(payload.get("g", 0)),
-                int(payload.get("b", 0)),
-                brightness=float(payload.get("brightness", 1.0)),
+                self._esp32_color[0],
+                self._esp32_color[1],
+                self._esp32_color[2],
+                brightness=self._esp32_brightness,
             )
             if self._artnet.last_error:
                 self.esp32_status = f"送信エラー: {self._artnet.last_error}"
             else:
-                r, g, b = self._artnet.last_rgb
-                self.esp32_status = f"送信中 {self.esp32_host} RGB({r},{g},{b})"
+                rr, gg, bb = self._artnet.last_rgb
+                self.esp32_status = f"送信中 {self.esp32_host} RGB({rr},{gg},{bb})"
         except Exception as e:
             self.esp32_status = f"送信失敗: {e}"
 
@@ -893,12 +927,12 @@ class LightController:
         host: str,
         *,
         universe: int = 0,
-        pixel_count: int = 170,
+        pixel_count: int = 720,
         auto_connect: bool | None = None,
     ) -> None:
         self.esp32_host = (host or "").strip()
         self.esp32_universe = max(0, min(32767, int(universe)))
-        self.esp32_pixel_count = max(1, min(170, int(pixel_count)))
+        self.esp32_pixel_count = max(1, min(2040, int(pixel_count)))
         if auto_connect is not None:
             self.esp32_auto_connect = bool(auto_connect)
         self._artnet.configure(
@@ -924,6 +958,8 @@ class LightController:
         if not self.esp32_host and self.esp32_enabled:
             self.esp32_enabled = False
             raise RuntimeError("ESP32 の IP / ホスト名を入力してください")
+        if not self.esp32_enabled:
+            self.esp32_pattern_stop()
         self._artnet.configure(
             host=self.esp32_host,
             universe=self.esp32_universe,
@@ -931,8 +967,10 @@ class LightController:
             enabled=self.esp32_enabled,
         )
         if self.esp32_enabled:
-            self.esp32_status = f"有効 → {self.esp32_host}:{self._artnet.port} Uni{self.esp32_universe}"
-            # 疎通確認の短い黒→保持
+            self.esp32_status = (
+                f"有効 → {self.esp32_host}:{self._artnet.port} "
+                f"Uni{self.esp32_universe}+ ({self.esp32_pixel_count}px)"
+            )
             self._artnet.blackout()
         else:
             try:
@@ -952,6 +990,101 @@ class LightController:
         self._esp32_override(
             {"r": int(r), "g": int(g), "b": int(b), "brightness": float(brightness)}
         )
+        self._emit("esp32")
+
+    def esp32_pattern_stop(self) -> None:
+        self._esp32_pattern_stop.set()
+        self.esp32_pattern_running = False
+        th = self._esp32_pattern_thread
+        if th is not None and th.is_alive() and th is not threading.current_thread():
+            th.join(timeout=0.6)
+        self._esp32_pattern_thread = None
+        if not self.esp32_pattern_id:
+            return
+        # keep last id for UI, mark stopped
+        self.esp32_status = f"パターン停止（{self.esp32_pattern_id}）"
+        self._emit("esp32")
+
+    def esp32_pattern_start(
+        self,
+        pattern_id: str,
+        *,
+        speed: float = 1.0,
+        brightness: float | None = None,
+        r: int | None = None,
+        g: int | None = None,
+        b: int | None = None,
+        r2: int | None = None,
+        g2: int | None = None,
+        b2: int | None = None,
+    ) -> None:
+        if not self.esp32_enabled:
+            raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+        pid = (pattern_id or "").strip().lower()
+        known = {p["id"] for p in ESP32_PATTERN_PRESETS}
+        if pid not in known:
+            raise RuntimeError(f"未知のパターン: {pattern_id}")
+        if r is not None and g is not None and b is not None:
+            self._esp32_color = (
+                max(0, min(255, int(r))),
+                max(0, min(255, int(g))),
+                max(0, min(255, int(b))),
+            )
+        if r2 is not None and g2 is not None and b2 is not None:
+            self._esp32_color2 = (
+                max(0, min(255, int(r2))),
+                max(0, min(255, int(g2))),
+                max(0, min(255, int(b2))),
+            )
+        if brightness is not None:
+            self._esp32_brightness = max(0.0, min(1.0, float(brightness)))
+        self.esp32_pattern_speed = max(0.05, min(5.0, float(speed)))
+        self.esp32_pattern_stop()
+        self._esp32_pattern_stop.clear()
+        self.esp32_pattern_id = pid
+        self.esp32_pattern_running = True
+        self.esp32_status = f"パターン再生中: {pid}"
+        self._esp32_pattern_thread = threading.Thread(
+            target=self._esp32_pattern_loop, daemon=True
+        )
+        self._esp32_pattern_thread.start()
+        self._emit("esp32")
+
+    def _esp32_pattern_loop(self) -> None:
+        fps = 30.0
+        dt = 1.0 / fps
+        t0 = time.monotonic()
+        pid = self.esp32_pattern_id
+        while not self._esp32_pattern_stop.is_set() and self.esp32_enabled:
+            if not self.esp32_enabled or not self.esp32_host:
+                break
+            # ポン出しホールド中はパターンを一時停止（タイル色優先）
+            if self.hold_order:
+                if self._esp32_pattern_stop.wait(0.05):
+                    break
+                continue
+            now = time.monotonic()
+            t = now - t0
+            try:
+                pixels = render_pattern(
+                    pid,
+                    self.esp32_pixel_count,
+                    t,
+                    color=self._esp32_color,
+                    color2=self._esp32_color2,
+                    speed=self.esp32_pattern_speed,
+                    brightness=self._esp32_brightness,
+                )
+                self._artnet.send_rgb_buffer(pixels, brightness=1.0)
+                if self._artnet.last_error:
+                    self.esp32_status = f"パターン送信エラー: {self._artnet.last_error}"
+            except Exception as e:
+                self.esp32_status = f"パターン失敗: {e}"
+                break
+            # フレーム待ち（停止シグナルで即抜ける）
+            if self._esp32_pattern_stop.wait(dt):
+                break
+        self.esp32_pattern_running = False
         self._emit("esp32")
 
     def esp32_probe(self) -> dict[str, Any]:

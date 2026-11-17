@@ -4,22 +4,23 @@ from __future__ import annotations
 
 import socket
 import threading
-from typing import Iterable
-
+from typing import Iterable, Sequence
 
 ARTNET_PORT = 6454
 _OP_DMX = 0x5000
+_PPU = 170  # RGB pixels per Art-Net universe
+_MAX_PIXELS = 2040  # 12 universes
 
 
 class ArtNetSender:
-    """Send solid-color (or raw channel) ArtDmx packets to a PixelCtl host."""
+    """Send solid-color / pixel-buffer ArtDmx packets to a PixelCtl host."""
 
     def __init__(self) -> None:
         self._sock: socket.socket | None = None
         self._lock = threading.Lock()
         self.host = ""
         self.port = ARTNET_PORT
-        self.universe = 0  # Art-Net universe number (device artnetOffset=1 → Uni 0 = internal 1)
+        self.universe = 0  # first Art-Net universe (offset=1 → Uni 0 = internal 1)
         self.pixel_count = 170
         self.enabled = False
         self._seq = 0
@@ -38,7 +39,7 @@ class ArtNetSender:
         with self._lock:
             self.host = (host or "").strip()
             self.universe = max(0, min(32767, int(universe)))
-            self.pixel_count = max(1, min(170, int(pixel_count)))
+            self.pixel_count = max(1, min(_MAX_PIXELS, int(pixel_count)))
             self.port = int(port) or ARTNET_PORT
             if enabled is not None:
                 self.enabled = bool(enabled)
@@ -99,6 +100,44 @@ class ArtNetSender:
         except OSError as e:
             self.last_error = str(e)
 
+    def send_rgb_buffer(
+        self,
+        pixels: Sequence[tuple[int, int, int] | Sequence[int]],
+        *,
+        brightness: float = 1.0,
+        start_universe: int | None = None,
+    ) -> None:
+        """Send a full RGB buffer across consecutive Art-Net universes (170 px each)."""
+        bri = max(0.0, min(1.0, float(brightness)))
+        n = min(len(pixels), _MAX_PIXELS)
+        if n <= 0:
+            return
+        base_uni = self.universe if start_universe is None else max(0, min(32767, int(start_universe)))
+        # flatten with brightness
+        flat: list[int] = []
+        sr = sg = sb = 0
+        for i in range(n):
+            p = pixels[i]
+            r = max(0, min(255, int(p[0])))
+            g = max(0, min(255, int(p[1])))
+            b = max(0, min(255, int(p[2])))
+            if bri < 0.999:
+                r = int(round(r * bri))
+                g = int(round(g * bri))
+                b = int(round(b * bri))
+            flat.extend((r, g, b))
+            sr += r
+            sg += g
+            sb += b
+        self.last_rgb = (sr // n, sg // n, sb // n)
+
+        uni_count = (n + _PPU - 1) // _PPU
+        for u in range(uni_count):
+            start = u * _PPU * 3
+            end = min(start + _PPU * 3, len(flat))
+            chunk = flat[start:end]
+            self.send_channels(chunk, universe=base_uni + u)
+
     def send_rgb_fill(
         self,
         r: int,
@@ -109,17 +148,15 @@ class ArtNetSender:
         pixel_count: int | None = None,
         universe: int | None = None,
     ) -> None:
-        """Fill N RGB pixels with one color (PixelCtl normal mapping)."""
+        """Fill N RGB pixels with one color across as many universes as needed."""
         bri = max(0.0, min(1.0, float(brightness)))
         rr = max(0, min(255, int(round(int(r) * bri))))
         gg = max(0, min(255, int(round(int(g) * bri))))
         bb = max(0, min(255, int(round(int(b) * bri))))
-        n = self.pixel_count if pixel_count is None else max(1, min(170, int(pixel_count)))
-        ch: list[int] = []
-        for _ in range(n):
-            ch.extend((rr, gg, bb))
+        n = self.pixel_count if pixel_count is None else max(1, min(_MAX_PIXELS, int(pixel_count)))
+        pixels = [(rr, gg, bb)] * n
         self.last_rgb = (rr, gg, bb)
-        self.send_channels(ch, universe=universe)
+        self.send_rgb_buffer(pixels, brightness=1.0, start_universe=universe)
 
     def blackout(self) -> None:
         self.send_rgb_fill(0, 0, 0, brightness=1.0)

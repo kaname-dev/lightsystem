@@ -24,7 +24,7 @@ _DEFAULTS: dict[str, Any] = {
     # ESP32 PixelCtl（Art-Net）
     "esp32_host": "",
     "esp32_universe": 0,
-    "esp32_pixel_count": 170,
+    "esp32_pixel_count": 720,
     "esp32_enabled": False,
     "esp32_auto_connect": False,
 }

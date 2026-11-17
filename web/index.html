@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Light System</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="stylesheet" href="/static/styles.css?v=20260317b" />
 </head>
 <body>
   <header class="top">
@@ -321,13 +321,13 @@
     <!-- ESP32 PixelCtl -->
     <section id="tab-esp32" class="panel">
       <h3>ESP32 LED（PixelCtl / Art-Net）</h3>
-      <p class="hint">PixelCtl ファームの Art-Net 受信へ UDP 送信します。既定 offset=1 なら Universe 0 を指定。</p>
+      <p class="hint">IP を入れてパターン／色ボタンを押すと、自動で保存＋送信有効化します（開始 Uni は通常 0）。</p>
       <div class="row wrap">
         <label class="grow">ホスト IP
-          <input type="text" id="esp32Host" placeholder="192.168.x.x" spellcheck="false" />
+          <input type="text" id="esp32Host" placeholder="192.168.2.107" spellcheck="false" autocomplete="off" />
         </label>
-        <label>Universe <input type="number" id="esp32Universe" min="0" max="32767" value="0" /></label>
-        <label>ピクセル数 <input type="number" id="esp32Pixels" min="1" max="170" value="170" /></label>
+        <label>開始 Uni <input type="number" id="esp32Universe" min="0" max="32767" value="0" /></label>
+        <label>ピクセル数 <input type="number" id="esp32Pixels" min="1" max="2040" value="720" /></label>
       </div>
       <div class="row wrap">
         <button type="button" id="btnEsp32Save">設定を保存</button>
@@ -339,7 +339,7 @@
       </div>
       <div class="row wrap">
         <div class="sb-field">
-          <span>カラーパレット</span>
+          <span>メイン色</span>
           <div class="led-palette-wrap">
             <canvas id="esp32Sv" width="200" height="160"></canvas>
             <canvas id="esp32Hue" width="22" height="160"></canvas>
@@ -354,16 +354,22 @@
         </div>
         <div>
           <label>明るさ <input type="range" id="esp32Bright" min="1" max="100" value="100" /></label>
+          <label>パターン速度 <input type="range" id="esp32PatSpeed" min="5" max="300" value="100" /></label>
+          <span id="esp32PatSpeedVal" class="hint">1.0×</span>
           <div class="row wrap" id="esp32ColorPresets" style="margin-top:10px"></div>
           <div class="row wrap" style="margin-top:10px">
-            <button type="button" id="btnEsp32Apply" class="primary">色を送る</button>
+            <button type="button" id="btnEsp32Apply" class="primary">単色を送る</button>
+            <button type="button" id="btnEsp32PatStop">パターン停止</button>
             <button type="button" id="btnEsp32Blackout">消灯</button>
           </div>
         </div>
       </div>
+      <h4 style="margin-top:16px">パターンプリセット</h4>
+      <p class="hint">先頭がクラブ定番（ストロボ／ドロップ／UV 等）。メイン色を使う演出もあります。速度スライダーで BPM 感を調整。</p>
+      <div class="row wrap" id="esp32PatternPresets"></div>
     </section>
   </main>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260317b"></script>
 </body>
 </html>

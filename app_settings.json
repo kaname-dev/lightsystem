@@ -6,5 +6,10 @@
   "ble_protocol": "triones",
   "ble_auto_connect": false,
   "audio_input_label": "55: CABLE Output (VB-Audio Point) (Windows WDM-KS)",
-  "audio_input_id": 55
+  "audio_input_id": 55,
+  "esp32_host": "192.168.2.107",
+  "esp32_universe": 0,
+  "esp32_pixel_count": 720,
+  "esp32_enabled": true,
+  "esp32_auto_connect": false
 }

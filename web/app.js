@@ -18,6 +18,64 @@
   let blePalette = null;
   let esp32Palette = null;
 
+  // サーバ未応答時でもボタンを出すためのフォールバック
+  const ESP32_PATTERN_FALLBACK = [
+    { id: "club_strobe_white", label: "白ストロボ", desc: "ブラインダー風の白点滅" },
+    { id: "club_strobe_color", label: "カラーストロボ", desc: "メイン色の高速点滅" },
+    { id: "club_blinder", label: "ブラインダー", desc: "白フラッシュ→減衰" },
+    { id: "club_bass_pulse", label: "バスパルス", desc: "キックっぽい全体パルス" },
+    { id: "club_buildup", label: "ビルドアップ", desc: "暗→徐々に明るく→ヒット" },
+    { id: "club_drop", label: "ドロップ", desc: "黒→白ヒット→色残光" },
+    { id: "club_uv_wash", label: "UVウォッシュ", desc: "紫〜青紫の全体洗い" },
+    { id: "club_rgb_wash", label: "RGBウォッシュ", desc: "赤緑青の切り替え洗い" },
+    { id: "club_halves", label: "ハーフ切替", desc: "左右で色が交互" },
+    { id: "club_quarters", label: "4分割フラッシュ", desc: "4セクション巡回点灯" },
+    { id: "club_tunnel", label: "トンネル", desc: "中央へ収束するリング" },
+    { id: "club_expand", label: "エクスプロード", desc: "中央から外側へ爆発" },
+    { id: "club_snake", label: "スネーク", desc: "複数ヘッドが這う" },
+    { id: "club_rain", label: "レイン", desc: "上から落ちる光点" },
+    { id: "club_heartbeat", label: "ハートビート", desc: "ドン・ドンの鼓動" },
+    { id: "club_laser_dots", label: "レーザードット", desc: "細点の高速ラン" },
+    { id: "club_sweep", label: "スイープ", desc: "太いビームが往復" },
+    { id: "club_zone_chase", label: "ゾーンチェイス", desc: "ブロックが階段状に走る" },
+    { id: "club_blackout_hit", label: "ブラックアウトヒット", desc: "ほぼ消灯→瞬間ヒット" },
+    { id: "club_warm_cool", label: "ウォーム／クール", desc: "暖色と寒色の波" },
+    { id: "club_magenta_teal", label: "マゼンタ／ティール", desc: "クラブ定番2色" },
+    { id: "club_sparkle_dark", label: "ダークスパークル", desc: "暗い床にキラ" },
+    { id: "club_roller", label: "ローラー", desc: "色帯がロール" },
+    { id: "club_alert", label: "アラート", desc: "赤点滅警告風" },
+    { id: "rainbow", label: "虹（固定）", desc: "全長レインボー" },
+    { id: "rainbow_cycle", label: "虹サイクル", desc: "虹が流れる" },
+    { id: "chase", label: "チェイス", desc: "色が走る" },
+    { id: "theater", label: "シアター", desc: "点滅チェイス" },
+    { id: "comet", label: "コメット", desc: "尾を引く光" },
+    { id: "scanner", label: "スキャナー", desc: "往復ビーム" },
+    { id: "breathe", label: "ブリーズ", desc: "全体が呼吸" },
+    { id: "strobe", label: "ストロボ", desc: "点滅" },
+    { id: "sparkle", label: "スパークル", desc: "きらめき" },
+    { id: "fire", label: "炎", desc: "炎っぽい揺らぎ" },
+    { id: "wave", label: "ウェーブ", desc: "正弦波の波" },
+    { id: "stripes", label: "ストライプ", desc: "2色交互" },
+    { id: "gradient", label: "グラデ", desc: "端から端へ色変化" },
+    { id: "wipe", label: "ワイプ", desc: "塗りつぶし進行" },
+    { id: "police", label: "ポリス", desc: "赤青交互" },
+    { id: "aurora", label: "オーロラ", desc: "緑紫の揺らぎ" },
+    { id: "ocean", label: "オーシャン", desc: "青緑の波" },
+    { id: "candy", label: "キャンディ", desc: "ポップな多色" },
+  ];
+  const ESP32_COLOR_FALLBACK = [
+    { name: "赤", r: 255, g: 0, b: 0 },
+    { name: "緑", r: 0, g: 255, b: 0 },
+    { name: "青", r: 0, g: 0, b: 255 },
+    { name: "白", r: 255, g: 255, b: 255 },
+    { name: "暖白", r: 255, g: 180, b: 100 },
+    { name: "紫", r: 180, g: 0, b: 255 },
+    { name: "黄", r: 255, g: 220, b: 0 },
+    { name: "シアン", r: 0, g: 220, b: 255 },
+    { name: "橙", r: 255, g: 120, b: 20 },
+    { name: "ピンク", r: 255, g: 80, b: 160 },
+  ];
+
   function luminance(r, g, b) {
     return 0.299 * r + 0.587 * g + 0.114 * b;
   }
@@ -710,6 +768,71 @@
     updateSwatch();
   }
 
+  function fillEsp32ColorPresets(list) {
+    const presets = $("esp32ColorPresets");
+    if (!presets) return;
+    const rows = list && list.length ? list : ESP32_COLOR_FALLBACK;
+    const sig = rows.map((p) => p.name || `${p.r},${p.g},${p.b}`).join("|");
+    if (presets.dataset.sig === sig && presets.childElementCount) return;
+    presets.innerHTML = "";
+    rows.forEach((p) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "preset-btn";
+      b.textContent = p.name;
+      b.style.borderColor = `rgb(${p.r},${p.g},${p.b})`;
+      b.addEventListener("click", () => {
+        if (esp32Palette) esp32Palette.setRgb(p.r, p.g, p.b);
+        else {
+          $("esp32R").value = p.r;
+          $("esp32G").value = p.g;
+          $("esp32B").value = p.b;
+        }
+        updateEsp32Swatch();
+        ensureEsp32Ready({ enable: true })
+          .then(() =>
+            api("/api/esp32/color", {
+              method: "POST",
+              body: JSON.stringify({
+                r: p.r,
+                g: p.g,
+                b: p.b,
+                brightness: Number($("esp32Bright").value) / 100,
+              }),
+            })
+          )
+          .then(applyEsp32State)
+          .catch(alert);
+      });
+      presets.appendChild(b);
+    });
+    presets.dataset.sig = sig;
+  }
+
+  function fillEsp32PatternPresets(list, activeId) {
+    const patBox = $("esp32PatternPresets");
+    if (!patBox) return;
+    const rows = list && list.length ? list : ESP32_PATTERN_FALLBACK;
+    const sig = rows.map((p) => p.id).join("|");
+    if (patBox.dataset.sig !== sig || !patBox.childElementCount) {
+      patBox.innerHTML = "";
+      rows.forEach((p) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "preset-btn";
+        b.dataset.pat = p.id;
+        b.title = p.desc || p.id;
+        b.textContent = p.label || p.id;
+        b.addEventListener("click", () => startEsp32Pattern(p.id));
+        patBox.appendChild(b);
+      });
+      patBox.dataset.sig = sig;
+    }
+    [...patBox.querySelectorAll("button")].forEach((btn) => {
+      btn.classList.toggle("active", !!activeId && btn.dataset.pat === activeId);
+    });
+  }
+
   function renderEsp32() {
     const esp = state?.esp32 || {};
     const enabled = !!esp.enabled;
@@ -719,8 +842,9 @@
       statusEl.className = `badge ${enabled ? "ok" : "bad"}`;
     }
     const host = $("esp32Host");
-    if (host && document.activeElement !== host && esp.host != null) {
-      host.value = esp.host || "";
+    // サーバ側ホストが空のときは入力中の値を消さない
+    if (host && document.activeElement !== host && esp.host) {
+      host.value = esp.host;
     }
     const uni = $("esp32Universe");
     if (uni && document.activeElement !== uni && esp.universe != null) {
@@ -733,44 +857,65 @@
     if ($("chkEsp32Auto") && document.activeElement !== $("chkEsp32Auto")) {
       $("chkEsp32Auto").checked = !!esp.auto_connect;
     }
-    const presets = $("esp32ColorPresets");
-    if (presets && !presets.dataset.filled) {
-      const list = state?.ble?.color_presets || [];
-      presets.innerHTML = "";
-      list.forEach((p) => {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "preset-btn";
-        b.textContent = p.name;
-        b.style.borderColor = `rgb(${p.r},${p.g},${p.b})`;
-        b.addEventListener("click", () => {
-          if (esp32Palette) esp32Palette.setRgb(p.r, p.g, p.b);
-          else {
-            $("esp32R").value = p.r;
-            $("esp32G").value = p.g;
-            $("esp32B").value = p.b;
-          }
-          updateEsp32Swatch();
-          api("/api/esp32/color", {
-            method: "POST",
-            body: JSON.stringify({
-              r: p.r,
-              g: p.g,
-              b: p.b,
-              brightness: Number($("esp32Bright").value) / 100,
-            }),
-          })
-            .then((j) => {
-              if (j.state) mergeState(j.state);
-              renderEsp32();
-            })
-            .catch(alert);
-        });
-        presets.appendChild(b);
-      });
-      if (list.length) presets.dataset.filled = "1";
+    if ($("esp32PatSpeed") && document.activeElement !== $("esp32PatSpeed")) {
+      const sp = Math.round((esp.pattern_speed || 1) * 100);
+      $("esp32PatSpeed").value = String(Math.max(5, Math.min(300, sp)));
+      if ($("esp32PatSpeedVal")) $("esp32PatSpeedVal").textContent = `${(sp / 100).toFixed(2)}×`;
     }
+    fillEsp32ColorPresets(state?.ble?.color_presets || ESP32_COLOR_FALLBACK);
+    fillEsp32PatternPresets(
+      esp.patterns && esp.patterns.length ? esp.patterns : ESP32_PATTERN_FALLBACK,
+      esp.pattern_running ? esp.pattern_id : ""
+    );
     updateEsp32Swatch();
+  }
+
+  function esp32FormConfig() {
+    return {
+      host: ($("esp32Host")?.value || "").trim(),
+      universe: Number($("esp32Universe")?.value) || 0,
+      pixel_count: Number($("esp32Pixels")?.value) || 720,
+      auto_connect: !!$("chkEsp32Auto")?.checked,
+    };
+  }
+
+  async function ensureEsp32Ready({ enable = true } = {}) {
+    const cfg = esp32FormConfig();
+    if (!cfg.host) {
+      throw new Error("先にホスト IP（例: 192.168.2.107）を入力してください");
+    }
+    const j = await api("/api/esp32/config", {
+      method: "POST",
+      body: JSON.stringify(cfg),
+    });
+    if (j?.state) mergeState(j.state);
+    if (enable && !state?.esp32?.enabled) {
+      const j2 = await api("/api/esp32/enable", {
+        method: "POST",
+        body: JSON.stringify({ enabled: true }),
+      });
+      if (j2?.state) mergeState(j2.state);
+    }
+    renderEsp32();
+  }
+
+  function startEsp32Pattern(patternId) {
+    ensureEsp32Ready({ enable: true })
+      .then(() =>
+        api("/api/esp32/pattern", {
+          method: "POST",
+          body: JSON.stringify({
+            pattern_id: patternId,
+            speed: Number($("esp32PatSpeed")?.value || 100) / 100,
+            brightness: Number($("esp32Bright").value) / 100,
+            r: Number($("esp32R").value),
+            g: Number($("esp32G").value),
+            b: Number($("esp32B").value),
+          }),
+        })
+      )
+      .then(applyEsp32State)
+      .catch(alert);
   }
 
   function updateEsp32Swatch() {
@@ -1239,8 +1384,25 @@
       document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
       document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
       btn.classList.add("active");
-      $(`tab-${btn.dataset.tab}`).classList.add("active");
+      const panel = $(`tab-${btn.dataset.tab}`);
+      if (panel) panel.classList.add("active");
       if (btn.dataset.tab === "timeline") drawTimeline();
+      if (btn.dataset.tab === "esp32") {
+        // display:none 中に描いたパレットが黒いままになる対策
+        if (esp32Palette) {
+          esp32Palette.setRgb(
+            Number($("esp32R")?.value || 255),
+            Number($("esp32G")?.value || 80),
+            Number($("esp32B")?.value || 40)
+          );
+        }
+        fillEsp32PatternPresets(
+          state?.esp32?.patterns?.length ? state.esp32.patterns : ESP32_PATTERN_FALLBACK,
+          state?.esp32?.pattern_running ? state.esp32.pattern_id : ""
+        );
+        fillEsp32ColorPresets(state?.ble?.color_presets || ESP32_COLOR_FALLBACK);
+        renderEsp32();
+      }
     });
   });
 
@@ -1627,33 +1789,20 @@
     renderEsp32();
   }
   $("btnEsp32Save")?.addEventListener("click", () =>
-    api("/api/esp32/config", {
-      method: "POST",
-      body: JSON.stringify({
-        host: ($("esp32Host").value || "").trim(),
-        universe: Number($("esp32Universe").value) || 0,
-        pixel_count: Number($("esp32Pixels").value) || 170,
-        auto_connect: !!$("chkEsp32Auto")?.checked,
-      }),
-    })
-      .then(applyEsp32State)
-      .catch(alert)
+    ensureEsp32Ready({ enable: false }).then(() => alert("設定を保存しました")).catch(alert)
   );
   $("btnEsp32Probe")?.addEventListener("click", () =>
-    api("/api/esp32/probe", { method: "POST" })
+    ensureEsp32Ready({ enable: false })
+      .then(() => api("/api/esp32/probe", { method: "POST" }))
       .then((j) => {
         applyEsp32State(j);
         if (!j.ok) alert(j.error || "HTTP 未応答（Art-Net は使える場合あり）");
+        else alert("疎通OK");
       })
       .catch(alert)
   );
   $("btnEsp32Enable")?.addEventListener("click", () =>
-    api("/api/esp32/enable", {
-      method: "POST",
-      body: JSON.stringify({ enabled: true }),
-    })
-      .then(applyEsp32State)
-      .catch(alert)
+    ensureEsp32Ready({ enable: true }).then(() => applyEsp32State({ state })).catch(alert)
   );
   $("btnEsp32Disable")?.addEventListener("click", () =>
     api("/api/esp32/enable", {
@@ -1663,35 +1812,38 @@
       .then(applyEsp32State)
       .catch(alert)
   );
-  $("chkEsp32Auto")?.addEventListener("change", (e) =>
-    api("/api/esp32/config", {
-      method: "POST",
-      body: JSON.stringify({
-        host: ($("esp32Host").value || "").trim(),
-        universe: Number($("esp32Universe").value) || 0,
-        pixel_count: Number($("esp32Pixels").value) || 170,
-        auto_connect: !!e.target.checked,
-      }),
-    })
-      .then(applyEsp32State)
-      .catch(alert)
+  $("chkEsp32Auto")?.addEventListener("change", () =>
+    ensureEsp32Ready({ enable: false }).catch(alert)
   );
   $("esp32Bright")?.addEventListener("input", updateEsp32Swatch);
+  $("esp32PatSpeed")?.addEventListener("input", (e) => {
+    const v = Number(e.target.value) / 100;
+    if ($("esp32PatSpeedVal")) $("esp32PatSpeedVal").textContent = `${v.toFixed(2)}×`;
+  });
   $("btnEsp32Apply")?.addEventListener("click", () =>
-    api("/api/esp32/color", {
-      method: "POST",
-      body: JSON.stringify({
-        r: Number($("esp32R").value),
-        g: Number($("esp32G").value),
-        b: Number($("esp32B").value),
-        brightness: Number($("esp32Bright").value) / 100,
-      }),
-    })
+    ensureEsp32Ready({ enable: true })
+      .then(() =>
+        api("/api/esp32/color", {
+          method: "POST",
+          body: JSON.stringify({
+            r: Number($("esp32R").value),
+            g: Number($("esp32G").value),
+            b: Number($("esp32B").value),
+            brightness: Number($("esp32Bright").value) / 100,
+          }),
+        })
+      )
       .then(applyEsp32State)
       .catch(alert)
   );
+  $("btnEsp32PatStop")?.addEventListener("click", () =>
+    api("/api/esp32/pattern/stop", { method: "POST" }).then(applyEsp32State).catch(alert)
+  );
   $("btnEsp32Blackout")?.addEventListener("click", () =>
-    api("/api/esp32/blackout", { method: "POST" }).then(applyEsp32State).catch(alert)
+    ensureEsp32Ready({ enable: true })
+      .then(() => api("/api/esp32/blackout", { method: "POST" }))
+      .then(applyEsp32State)
+      .catch(alert)
   );
 
   $("bleMode").addEventListener("change", () => {
@@ -1982,15 +2134,25 @@
 
   window.addEventListener("resize", () => drawTimeline());
 
-  tePalette = createLedPalette(
-    "teLedSv", "teLedHue", "teLedR", "teLedG", "teLedB", "teLedSwatch", "teLedRgbLabel"
-  );
-  blePalette = createLedPalette(
-    "bleLedSv", "bleLedHue", "ledR", "ledG", "ledB", "ledSwatch", "bleLedRgbLabel"
-  );
-  esp32Palette = createLedPalette(
-    "esp32Sv", "esp32Hue", "esp32R", "esp32G", "esp32B", "esp32Swatch", "esp32RgbLabel"
-  );
+  try {
+    tePalette = createLedPalette(
+      "teLedSv", "teLedHue", "teLedR", "teLedG", "teLedB", "teLedSwatch", "teLedRgbLabel"
+    );
+  } catch (_) {}
+  try {
+    blePalette = createLedPalette(
+      "bleLedSv", "bleLedHue", "ledR", "ledG", "ledB", "ledSwatch", "bleLedRgbLabel"
+    );
+  } catch (_) {}
+  try {
+    esp32Palette = createLedPalette(
+      "esp32Sv", "esp32Hue", "esp32R", "esp32G", "esp32B", "esp32Swatch", "esp32RgbLabel"
+    );
+  } catch (_) {}
+
+  // 状態取得前でもプリセットを必ず表示
+  fillEsp32PatternPresets(ESP32_PATTERN_FALLBACK, "");
+  fillEsp32ColorPresets(ESP32_COLOR_FALLBACK);
 
   connectWs();
   refreshState().catch((err) => {

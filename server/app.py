@@ -82,12 +82,24 @@ class BleModeBody(BaseModel):
 class Esp32ConfigBody(BaseModel):
     host: str
     universe: int = 0
-    pixel_count: int = 170
+    pixel_count: int = 720
     auto_connect: bool | None = None
 
 
 class Esp32EnableBody(BaseModel):
     enabled: bool
+
+
+class Esp32PatternBody(BaseModel):
+    pattern_id: str
+    speed: float = 1.0
+    brightness: float | None = None
+    r: int | None = None
+    g: int | None = None
+    b: int | None = None
+    r2: int | None = None
+    g2: int | None = None
+    b2: int | None = None
 
 
 class HeightBody(BaseModel):
@@ -317,7 +329,31 @@ def api_esp32_probe() -> dict[str, Any]:
 
 @app.post("/api/esp32/blackout")
 def api_esp32_blackout() -> dict[str, Any]:
+    _ok_call(ctrl.esp32_pattern_stop)
     _ok_call(ctrl.esp32_color, 0, 0, 0, 1.0)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/pattern")
+def api_esp32_pattern(body: Esp32PatternBody) -> dict[str, Any]:
+    _ok_call(
+        ctrl.esp32_pattern_start,
+        body.pattern_id,
+        speed=body.speed,
+        brightness=body.brightness,
+        r=body.r,
+        g=body.g,
+        b=body.b,
+        r2=body.r2,
+        g2=body.g2,
+        b2=body.b2,
+    )
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/pattern/stop")
+def api_esp32_pattern_stop() -> dict[str, Any]:
+    _ok_call(ctrl.esp32_pattern_stop)
     return {"ok": True, "state": ctrl.snapshot()}
 
 
@@ -562,11 +598,22 @@ async def ws_endpoint(ws: WebSocket) -> None:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    resp = FileResponse(WEB_DIR / "index.html")
+    resp.headers["Cache-Control"] = "no-store, max-age=0"
+    return resp
 
 
 if WEB_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+
+@app.middleware("http")
+async def _no_cache_static(request, call_next):
+    response = await call_next(request)
+    path = request.url.path or ""
+    if path.startswith("/static/") or path == "/":
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 def main() -> None:

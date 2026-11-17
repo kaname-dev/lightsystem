@@ -264,6 +264,11 @@ select, input[type="number"] {
   padding: 6px 10px;
   font-size: 0.8rem;
 }
+.preset-btn.active {
+  background: #2a4a6e;
+  color: #fff;
+  border-color: var(--accent, #5b9fd4);
+}
 .dmx-palette h3, .tiles-edit h3 { margin-top: 0; }
 
 .swatch {
