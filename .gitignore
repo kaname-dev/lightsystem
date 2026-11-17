@@ -13,3 +13,7 @@ env/
 *.log
 .DS_Store
 Thumbs.db
+
+# uploaded audio / media (keep folder via .gitkeep)
+server/data/uploads/*
+!server/data/uploads/.gitkeep
