@@ -21,6 +21,7 @@
     <button type="button" data-tab="ai">AI・接続</button>
     <button type="button" data-tab="dmx">DMX</button>
     <button type="button" data-tab="ble">BLE LED</button>
+    <button type="button" data-tab="esp32">ESP32 LED</button>
   </nav>
 
   <main>
@@ -118,6 +119,7 @@
           <legend>対象機器</legend>
           <label class="sb-check"><input type="checkbox" id="teLaser" /> DMX レーザー</label>
           <label class="sb-check"><input type="checkbox" id="teLed" /> Bluetooth LED</label>
+          <label class="sb-check"><input type="checkbox" id="teEsp32" /> ESP32 LED（Art-Net）</label>
         </fieldset>
 
         <section id="teLaserPanel" class="sb-device-panel" hidden>
@@ -141,7 +143,7 @@
         </section>
 
         <section id="teLedPanel" class="sb-device-panel" hidden>
-          <h4>LED 設定</h4>
+          <h4>LED 色（BLE / ESP32 共通）</h4>
           <label class="sb-field">モード／エフェクト
             <select id="teLedMode"></select>
           </label>
@@ -314,6 +316,51 @@
         <button type="button" id="btnBleMode">エフェクト送信</button>
       </div>
       <p class="hint">エフェクトは変更で即時反映（モード選択時）。</p>
+    </section>
+
+    <!-- ESP32 PixelCtl -->
+    <section id="tab-esp32" class="panel">
+      <h3>ESP32 LED（PixelCtl / Art-Net）</h3>
+      <p class="hint">PixelCtl ファームの Art-Net 受信へ UDP 送信します。既定 offset=1 なら Universe 0 を指定。</p>
+      <div class="row wrap">
+        <label class="grow">ホスト IP
+          <input type="text" id="esp32Host" placeholder="192.168.x.x" spellcheck="false" />
+        </label>
+        <label>Universe <input type="number" id="esp32Universe" min="0" max="32767" value="0" /></label>
+        <label>ピクセル数 <input type="number" id="esp32Pixels" min="1" max="170" value="170" /></label>
+      </div>
+      <div class="row wrap">
+        <button type="button" id="btnEsp32Save">設定を保存</button>
+        <button type="button" id="btnEsp32Probe">HTTP 疎通</button>
+        <button type="button" id="btnEsp32Enable" class="primary">送信を有効化</button>
+        <button type="button" id="btnEsp32Disable">無効化</button>
+        <label><input type="checkbox" id="chkEsp32Auto" /> 起動時に自動有効</label>
+        <span id="esp32Status" class="badge">無効</span>
+      </div>
+      <div class="row wrap">
+        <div class="sb-field">
+          <span>カラーパレット</span>
+          <div class="led-palette-wrap">
+            <canvas id="esp32Sv" width="200" height="160"></canvas>
+            <canvas id="esp32Hue" width="22" height="160"></canvas>
+          </div>
+          <div class="led-palette-meta">
+            <span class="swatch" id="esp32Swatch"></span>
+            <span id="esp32RgbLabel">RGB 255, 80, 40</span>
+          </div>
+          <input type="hidden" id="esp32R" value="255" />
+          <input type="hidden" id="esp32G" value="80" />
+          <input type="hidden" id="esp32B" value="40" />
+        </div>
+        <div>
+          <label>明るさ <input type="range" id="esp32Bright" min="1" max="100" value="100" /></label>
+          <div class="row wrap" id="esp32ColorPresets" style="margin-top:10px"></div>
+          <div class="row wrap" style="margin-top:10px">
+            <button type="button" id="btnEsp32Apply" class="primary">色を送る</button>
+            <button type="button" id="btnEsp32Blackout">消灯</button>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
 

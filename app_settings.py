@@ -21,6 +21,12 @@ _DEFAULTS: dict[str, Any] = {
     # 共有 AI の音声入力（前回選択）
     "audio_input_label": "",
     "audio_input_id": -1,
+    # ESP32 PixelCtl（Art-Net）
+    "esp32_host": "",
+    "esp32_universe": 0,
+    "esp32_pixel_count": 170,
+    "esp32_enabled": False,
+    "esp32_auto_connect": False,
 }
 
 _lock = threading.Lock()

@@ -26,6 +26,7 @@ for p in (str(BLE_APP), str(DMX_DIR), str(ROOT)):
         sys.path.insert(0, p)
 
 from server.core.dmx_sender import DMX_CHANNELS, OpenDMXSender, list_com_ports  # noqa: E402
+from server.core.artnet_sender import ArtNetSender  # noqa: E402
 
 try:
     import sounddevice as sd
@@ -255,6 +256,7 @@ def _default_tile() -> dict[str, Any]:
         "hotkey": None,
         "apply_laser": True,
         "apply_led": False,
+        "apply_esp32": False,
         "led_r": 255,
         "led_g": 80,
         "led_b": 40,
@@ -281,6 +283,7 @@ def _normalize_tile(raw: dict[str, Any]) -> dict[str, Any]:
     base["hotkey"] = None if hk in (None, "", "null") else str(hk)[:16]
     base["apply_laser"] = bool(base.get("apply_laser", True))
     base["apply_led"] = bool(base.get("apply_led", False))
+    base["apply_esp32"] = bool(base.get("apply_esp32", False))
     base["led_r"] = max(0, min(255, int(base.get("led_r", 255))))
     base["led_g"] = max(0, min(255, int(base.get("led_g", 80))))
     base["led_b"] = max(0, min(255, int(base.get("led_b", 40))))
@@ -379,6 +382,16 @@ class LightController:
     dmx_auto_connect: bool = False
     last_error: str = ""
 
+    # ESP32 PixelCtl (Art-Net)
+    _artnet: ArtNetSender = field(default_factory=ArtNetSender)
+    esp32_host: str = ""
+    esp32_universe: int = 0
+    esp32_pixel_count: int = 170
+    esp32_enabled: bool = False
+    esp32_auto_connect: bool = False
+    esp32_status: str = "無効"
+    _ai_esp_last: float = 0.0
+
     # AI
     _analyzer: Any = None
     ai_active: bool = False
@@ -420,6 +433,23 @@ class LightController:
         self.ble_auto_connect = bool(s.get("ble_auto_connect", False))
         self.ble_address = str(s.get("ble_address", "") or "").strip()
         self.ble_protocol = str(s.get("ble_protocol", "triones") or "triones")
+        self.esp32_host = str(s.get("esp32_host", "") or "").strip()
+        self.esp32_auto_connect = bool(s.get("esp32_auto_connect", False))
+        self.esp32_enabled = bool(s.get("esp32_enabled", False))
+        try:
+            self.esp32_universe = max(0, int(s.get("esp32_universe", 0) or 0))
+        except (TypeError, ValueError):
+            self.esp32_universe = 0
+        try:
+            self.esp32_pixel_count = max(1, min(170, int(s.get("esp32_pixel_count", 170) or 170)))
+        except (TypeError, ValueError):
+            self.esp32_pixel_count = 170
+        self._artnet.configure(
+            host=self.esp32_host,
+            universe=self.esp32_universe,
+            pixel_count=self.esp32_pixel_count,
+            enabled=False,
+        )
         try:
             self.base_addr = max(1, int(s.get("dmx_base_addr", 1) or 1))
         except (TypeError, ValueError):
@@ -450,6 +480,17 @@ class LightController:
             except Exception as e:
                 self.last_error = f"BLE自動接続失敗: {e}"
                 self._emit("error")
+        if self.esp32_auto_connect and self.esp32_host:
+            try:
+                self.esp32_enable(True)
+            except Exception as e:
+                self.last_error = f"ESP32自動接続失敗: {e}"
+                self._emit("error")
+        elif self.esp32_enabled and self.esp32_host:
+            try:
+                self.esp32_enable(True)
+            except Exception:
+                pass
 
     # ---- events ----
     def add_listener(self, cb: Callable[[dict[str, Any]], None]) -> None:
@@ -510,6 +551,16 @@ class LightController:
                         for n, rgb in LED_COLOR_PRESETS
                     ],
                     "custom_fx": [{"id": LED_FX_FLAME, "label": "炎（ぱっと点灯）"}],
+                },
+                "esp32": {
+                    "enabled": self.esp32_enabled,
+                    "host": self.esp32_host,
+                    "universe": self.esp32_universe,
+                    "pixel_count": self.esp32_pixel_count,
+                    "auto_connect": self.esp32_auto_connect,
+                    "status": self.esp32_status,
+                    "last_rgb": list(self._artnet.last_rgb),
+                    "last_error": self._artnet.last_error,
                 },
                 "ai": {
                     "active": self.ai_active,
@@ -719,11 +770,13 @@ class LightController:
             self.stop_motion()
             self.set_channels([0] * 10, push=True)
             self._ble_override(None)
+            self._esp32_override(None)
             return
         order = [s for s in self.hold_order if s in self.holds]
         tiles = [self.holds[s] for s in order]
         laser = next((t for t in reversed(tiles) if t.get("apply_laser", True)), None)
         led = next((t for t in reversed(tiles) if t.get("apply_led", False)), None)
+        esp = next((t for t in reversed(tiles) if t.get("apply_esp32", False)), None)
         if led is not None:
             self._ble_override(
                 {
@@ -737,6 +790,17 @@ class LightController:
             )
         else:
             self._ble_override(None)
+        if esp is not None:
+            self._esp32_override(
+                {
+                    "r": int(esp.get("led_r", 255)),
+                    "g": int(esp.get("led_g", 80)),
+                    "b": int(esp.get("led_b", 40)),
+                    "brightness": float(esp.get("led_brightness", 100.0)) / 100.0,
+                }
+            )
+        else:
+            self._esp32_override(None)
         if laser is not None:
             self._apply_laser_tile(laser)
         else:
@@ -801,6 +865,113 @@ class LightController:
                 )
         except Exception:
             pass
+
+    def _esp32_override(self, payload: dict[str, Any] | None) -> None:
+        if not self.esp32_enabled or not self.esp32_host:
+            return
+        try:
+            if payload is None:
+                self._artnet.blackout()
+                self.esp32_status = f"送信中 {self.esp32_host}（消灯）"
+                return
+            self._artnet.send_rgb_fill(
+                int(payload.get("r", 0)),
+                int(payload.get("g", 0)),
+                int(payload.get("b", 0)),
+                brightness=float(payload.get("brightness", 1.0)),
+            )
+            if self._artnet.last_error:
+                self.esp32_status = f"送信エラー: {self._artnet.last_error}"
+            else:
+                r, g, b = self._artnet.last_rgb
+                self.esp32_status = f"送信中 {self.esp32_host} RGB({r},{g},{b})"
+        except Exception as e:
+            self.esp32_status = f"送信失敗: {e}"
+
+    def esp32_configure(
+        self,
+        host: str,
+        *,
+        universe: int = 0,
+        pixel_count: int = 170,
+        auto_connect: bool | None = None,
+    ) -> None:
+        self.esp32_host = (host or "").strip()
+        self.esp32_universe = max(0, min(32767, int(universe)))
+        self.esp32_pixel_count = max(1, min(170, int(pixel_count)))
+        if auto_connect is not None:
+            self.esp32_auto_connect = bool(auto_connect)
+        self._artnet.configure(
+            host=self.esp32_host,
+            universe=self.esp32_universe,
+            pixel_count=self.esp32_pixel_count,
+            enabled=self.esp32_enabled,
+        )
+        try:
+            update_settings(
+                esp32_host=self.esp32_host,
+                esp32_universe=self.esp32_universe,
+                esp32_pixel_count=self.esp32_pixel_count,
+                esp32_auto_connect=self.esp32_auto_connect,
+                esp32_enabled=self.esp32_enabled,
+            )
+        except Exception:
+            pass
+        self._emit("esp32")
+
+    def esp32_enable(self, enabled: bool) -> None:
+        self.esp32_enabled = bool(enabled)
+        if not self.esp32_host and self.esp32_enabled:
+            self.esp32_enabled = False
+            raise RuntimeError("ESP32 の IP / ホスト名を入力してください")
+        self._artnet.configure(
+            host=self.esp32_host,
+            universe=self.esp32_universe,
+            pixel_count=self.esp32_pixel_count,
+            enabled=self.esp32_enabled,
+        )
+        if self.esp32_enabled:
+            self.esp32_status = f"有効 → {self.esp32_host}:{self._artnet.port} Uni{self.esp32_universe}"
+            # 疎通確認の短い黒→保持
+            self._artnet.blackout()
+        else:
+            try:
+                self._artnet.blackout()
+            except Exception:
+                pass
+            self.esp32_status = "無効"
+        try:
+            update_settings(esp32_enabled=self.esp32_enabled, esp32_host=self.esp32_host)
+        except Exception:
+            pass
+        self._emit("esp32")
+
+    def esp32_color(self, r: int, g: int, b: int, brightness: float = 1.0) -> None:
+        if not self.esp32_enabled:
+            raise RuntimeError("ESP32 送信が無効です。先に有効化してください")
+        self._esp32_override(
+            {"r": int(r), "g": int(g), "b": int(b), "brightness": float(brightness)}
+        )
+        self._emit("esp32")
+
+    def esp32_probe(self) -> dict[str, Any]:
+        """PixelCtl HTTP /api/status を叩いて存在確認（任意）。"""
+        host = self.esp32_host.strip()
+        if not host:
+            raise RuntimeError("ホスト未設定")
+        import urllib.request
+
+        url = f"http://{host}/api/status"
+        try:
+            with urllib.request.urlopen(url, timeout=2.5) as resp:
+                raw = resp.read().decode("utf-8", errors="replace")
+            self.esp32_status = f"応答あり {host}"
+            self._emit("esp32")
+            return {"ok": True, "body": raw[:2000]}
+        except Exception as e:
+            self.esp32_status = f"HTTP 未応答（Art-Net は使える場合あり）: {e}"
+            self._emit("esp32")
+            return {"ok": False, "error": str(e)}
 
     # ---- DMX ----
     def list_ports(self) -> list[dict[str, str]]:
@@ -1117,14 +1288,15 @@ class LightController:
             raise RuntimeError("BLE 未接続")
         self._ble_worker.submit(self._ble.set_power(True))
         self._ble_worker.submit(self._ble.set_color(r, g, b, brightness)).result(timeout=5)
+        # ESP32 有効時は同じ色をミラー
+        if self.esp32_enabled:
+            self._esp32_override({"r": r, "g": g, "b": b, "brightness": brightness})
 
     def _on_ai_lighting_frame(self, frame: Any) -> None:
         if not self.ai_active:
             return
         # ポン出しホールド中は LED を触らない
         if self.hold_order:
-            return
-        if not self.ble_connected or self._ble is None or self._ble_worker is None:
             return
         now = time.monotonic()
         if now - self._ai_ble_last < 0.045:
@@ -1136,14 +1308,13 @@ class LightController:
                 bright = min(1.0, bright + 0.12)
             if getattr(frame, "effect", "") == "accel_blink":
                 bright = 1.0 if bright >= 0.35 or getattr(frame, "beat", False) else 0.03
-            self._ble_worker.submit(
-                self._ble.set_color(
-                    int(getattr(frame, "r", 0)),
-                    int(getattr(frame, "g", 0)),
-                    int(getattr(frame, "b", 0)),
-                    bright,
-                )
-            )
+            r = int(getattr(frame, "r", 0))
+            g = int(getattr(frame, "g", 0))
+            b = int(getattr(frame, "b", 0))
+            if self.ble_connected and self._ble is not None and self._ble_worker is not None:
+                self._ble_worker.submit(self._ble.set_color(r, g, b, bright))
+            if self.esp32_enabled:
+                self._esp32_override({"r": r, "g": g, "b": b, "brightness": bright})
         except Exception:
             pass
 

@@ -16,6 +16,7 @@
   let sidebarMode = "new"; // "new" | "edit"
   let tePalette = null;
   let blePalette = null;
+  let esp32Palette = null;
 
   function luminance(r, g, b) {
     return 0.299 * r + 0.587 * g + 0.114 * b;
@@ -265,6 +266,9 @@
         if (msg.event === "ble" || msg.event === "hello") {
           renderBle();
         }
+        if (msg.event === "esp32" || msg.event === "hello") {
+          renderEsp32();
+        }
         if (msg.event === "ai" || msg.event === "hello") {
           renderAi();
         }
@@ -321,6 +325,7 @@
     renderCues();
     renderDmx();
     renderBle();
+    renderEsp32();
     renderAi();
     renderTileEditor();
     drawTimeline();
@@ -705,6 +710,77 @@
     updateSwatch();
   }
 
+  function renderEsp32() {
+    const esp = state?.esp32 || {};
+    const enabled = !!esp.enabled;
+    const statusEl = $("esp32Status");
+    if (statusEl) {
+      statusEl.textContent = esp.status || (enabled ? "有効" : "無効");
+      statusEl.className = `badge ${enabled ? "ok" : "bad"}`;
+    }
+    const host = $("esp32Host");
+    if (host && document.activeElement !== host && esp.host != null) {
+      host.value = esp.host || "";
+    }
+    const uni = $("esp32Universe");
+    if (uni && document.activeElement !== uni && esp.universe != null) {
+      uni.value = String(esp.universe);
+    }
+    const px = $("esp32Pixels");
+    if (px && document.activeElement !== px && esp.pixel_count != null) {
+      px.value = String(esp.pixel_count);
+    }
+    if ($("chkEsp32Auto") && document.activeElement !== $("chkEsp32Auto")) {
+      $("chkEsp32Auto").checked = !!esp.auto_connect;
+    }
+    const presets = $("esp32ColorPresets");
+    if (presets && !presets.dataset.filled) {
+      const list = state?.ble?.color_presets || [];
+      presets.innerHTML = "";
+      list.forEach((p) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "preset-btn";
+        b.textContent = p.name;
+        b.style.borderColor = `rgb(${p.r},${p.g},${p.b})`;
+        b.addEventListener("click", () => {
+          if (esp32Palette) esp32Palette.setRgb(p.r, p.g, p.b);
+          else {
+            $("esp32R").value = p.r;
+            $("esp32G").value = p.g;
+            $("esp32B").value = p.b;
+          }
+          updateEsp32Swatch();
+          api("/api/esp32/color", {
+            method: "POST",
+            body: JSON.stringify({
+              r: p.r,
+              g: p.g,
+              b: p.b,
+              brightness: Number($("esp32Bright").value) / 100,
+            }),
+          })
+            .then((j) => {
+              if (j.state) mergeState(j.state);
+              renderEsp32();
+            })
+            .catch(alert);
+        });
+        presets.appendChild(b);
+      });
+      if (list.length) presets.dataset.filled = "1";
+    }
+    updateEsp32Swatch();
+  }
+
+  function updateEsp32Swatch() {
+    const r = $("esp32R")?.value ?? 255;
+    const g = $("esp32G")?.value ?? 80;
+    const b = $("esp32B")?.value ?? 40;
+    if ($("esp32Swatch")) $("esp32Swatch").style.background = `rgb(${r},${g},${b})`;
+    if ($("esp32RgbLabel")) $("esp32RgbLabel").textContent = `RGB ${r}, ${g}, ${b}`;
+  }
+
   function renderAi() {
     const ai = state?.ai || {};
     $("aiStatus").textContent = ai.status || (ai.active ? "動作中" : "停止中");
@@ -807,8 +883,10 @@
   function syncDevicePanels() {
     const laserOn = !!$("teLaser")?.checked;
     const ledOn = !!$("teLed")?.checked;
+    const espOn = !!$("teEsp32")?.checked;
     if ($("teLaserPanel")) $("teLaserPanel").hidden = !laserOn;
-    if ($("teLedPanel")) $("teLedPanel").hidden = !ledOn;
+    // BLE / ESP32 とも色パネルを共有
+    if ($("teLedPanel")) $("teLedPanel").hidden = !(ledOn || espOn);
   }
 
   function defaultNewTileForm() {
@@ -819,6 +897,7 @@
     $("teHotkey").value = "";
     $("teLaser").checked = false;
     $("teLed").checked = false;
+    if ($("teEsp32")) $("teEsp32").checked = false;
     $("teRunMotion").checked = true;
     $("teDotBase").checked = dmx.apply_dot_base !== false;
     fillTeMotionOptions();
@@ -857,6 +936,7 @@
     $("teHotkey").value = t.hotkey || "";
     $("teLaser").checked = t.apply_laser !== false;
     $("teLed").checked = !!t.apply_led;
+    if ($("teEsp32")) $("teEsp32").checked = !!t.apply_esp32;
     $("teRunMotion").checked = t.run_motion !== false;
     $("teDotBase").checked = t.apply_dot_base !== false;
     fillTeMotionOptions();
@@ -888,6 +968,7 @@
     const modeVal = $("teLedMode").value;
     const laserOn = $("teLaser").checked;
     const ledOn = $("teLed").checked;
+    const espOn = !!$("teEsp32")?.checked;
     const ch = [...editChannels];
     ch[8] = Number($("teCh9").value);
     return {
@@ -901,6 +982,7 @@
       hotkey: $("teHotkey").value.trim() || null,
       apply_laser: laserOn,
       apply_led: ledOn,
+      apply_esp32: espOn,
       led_r: Number($("teLedR").value),
       led_g: Number($("teLedG").value),
       led_b: Number($("teLedB").value),
@@ -919,7 +1001,8 @@
     }
     const devices = [];
     if (t.apply_laser !== false) devices.push("レーザー");
-    if (t.apply_led) devices.push("LED");
+    if (t.apply_led) devices.push("BLE");
+    if (t.apply_esp32) devices.push("ESP32");
     const motionName = (state?.dmx?.motions || [])[t.motion_index || 0] || `idx ${t.motion_index || 0}`;
     let ledInfo = "—";
     if (t.apply_led) {
@@ -1538,6 +1621,79 @@
       }),
     }).catch(alert)
   );
+  // ESP32 PixelCtl
+  function applyEsp32State(j) {
+    if (j?.state) mergeState(j.state);
+    renderEsp32();
+  }
+  $("btnEsp32Save")?.addEventListener("click", () =>
+    api("/api/esp32/config", {
+      method: "POST",
+      body: JSON.stringify({
+        host: ($("esp32Host").value || "").trim(),
+        universe: Number($("esp32Universe").value) || 0,
+        pixel_count: Number($("esp32Pixels").value) || 170,
+        auto_connect: !!$("chkEsp32Auto")?.checked,
+      }),
+    })
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("btnEsp32Probe")?.addEventListener("click", () =>
+    api("/api/esp32/probe", { method: "POST" })
+      .then((j) => {
+        applyEsp32State(j);
+        if (!j.ok) alert(j.error || "HTTP 未応答（Art-Net は使える場合あり）");
+      })
+      .catch(alert)
+  );
+  $("btnEsp32Enable")?.addEventListener("click", () =>
+    api("/api/esp32/enable", {
+      method: "POST",
+      body: JSON.stringify({ enabled: true }),
+    })
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("btnEsp32Disable")?.addEventListener("click", () =>
+    api("/api/esp32/enable", {
+      method: "POST",
+      body: JSON.stringify({ enabled: false }),
+    })
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("chkEsp32Auto")?.addEventListener("change", (e) =>
+    api("/api/esp32/config", {
+      method: "POST",
+      body: JSON.stringify({
+        host: ($("esp32Host").value || "").trim(),
+        universe: Number($("esp32Universe").value) || 0,
+        pixel_count: Number($("esp32Pixels").value) || 170,
+        auto_connect: !!e.target.checked,
+      }),
+    })
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("esp32Bright")?.addEventListener("input", updateEsp32Swatch);
+  $("btnEsp32Apply")?.addEventListener("click", () =>
+    api("/api/esp32/color", {
+      method: "POST",
+      body: JSON.stringify({
+        r: Number($("esp32R").value),
+        g: Number($("esp32G").value),
+        b: Number($("esp32B").value),
+        brightness: Number($("esp32Bright").value) / 100,
+      }),
+    })
+      .then(applyEsp32State)
+      .catch(alert)
+  );
+  $("btnEsp32Blackout")?.addEventListener("click", () =>
+    api("/api/esp32/blackout", { method: "POST" }).then(applyEsp32State).catch(alert)
+  );
+
   $("bleMode").addEventListener("change", () => {
     const mid = Number($("bleMode").value);
     if (mid < 0) {
@@ -1576,6 +1732,7 @@
   });
   $("teLaser").addEventListener("change", syncDevicePanels);
   $("teLed").addEventListener("change", syncDevicePanels);
+  if ($("teEsp32")) $("teEsp32").addEventListener("change", syncDevicePanels);
   $("teSpeed").addEventListener("input", (e) => {
     $("teSpeedVal").textContent = Number(e.target.value).toFixed(2);
   });
@@ -1605,8 +1762,8 @@
   });
 
   $("btnTileSidebarSave").addEventListener("click", () => {
-    if (!$("teLaser").checked && !$("teLed").checked) {
-      alert("DMX レーザーか Bluetooth LED のどちらか（または両方）を選んでください");
+    if (!$("teLaser").checked && !$("teLed").checked && !$("teEsp32")?.checked) {
+      alert("DMX / BLE / ESP32 のいずれかを選んでください");
       return;
     }
     const tile = readTileFromForm();
@@ -1830,6 +1987,9 @@
   );
   blePalette = createLedPalette(
     "bleLedSv", "bleLedHue", "ledR", "ledG", "ledB", "ledSwatch", "bleLedRgbLabel"
+  );
+  esp32Palette = createLedPalette(
+    "esp32Sv", "esp32Hue", "esp32R", "esp32G", "esp32B", "esp32Swatch", "esp32RgbLabel"
   );
 
   connectWs();

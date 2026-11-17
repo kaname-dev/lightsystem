@@ -79,6 +79,17 @@ class BleModeBody(BaseModel):
     speed: int = 50
 
 
+class Esp32ConfigBody(BaseModel):
+    host: str
+    universe: int = 0
+    pixel_count: int = 170
+    auto_connect: bool | None = None
+
+
+class Esp32EnableBody(BaseModel):
+    enabled: bool
+
+
 class HeightBody(BaseModel):
     lo_pct: float
     hi_pct: float
@@ -272,6 +283,42 @@ def api_ble_mode(body: BleModeBody) -> dict[str, Any]:
 def api_ble_color(body: BleColorBody) -> dict[str, Any]:
     _ok_call(ctrl.ble_color, body.r, body.g, body.b, body.brightness)
     return {"ok": True}
+
+
+@app.post("/api/esp32/config")
+def api_esp32_config(body: Esp32ConfigBody) -> dict[str, Any]:
+    _ok_call(
+        ctrl.esp32_configure,
+        body.host,
+        universe=body.universe,
+        pixel_count=body.pixel_count,
+        auto_connect=body.auto_connect,
+    )
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/enable")
+def api_esp32_enable(body: Esp32EnableBody) -> dict[str, Any]:
+    _ok_call(ctrl.esp32_enable, body.enabled)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/color")
+def api_esp32_color(body: BleColorBody) -> dict[str, Any]:
+    _ok_call(ctrl.esp32_color, body.r, body.g, body.b, body.brightness)
+    return {"ok": True, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/probe")
+def api_esp32_probe() -> dict[str, Any]:
+    result = _ok_call(ctrl.esp32_probe)
+    return {**result, "state": ctrl.snapshot()}
+
+
+@app.post("/api/esp32/blackout")
+def api_esp32_blackout() -> dict[str, Any]:
+    _ok_call(ctrl.esp32_color, 0, 0, 0, 1.0)
+    return {"ok": True, "state": ctrl.snapshot()}
 
 
 @app.post("/api/ai/start")
